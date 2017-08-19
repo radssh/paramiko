@@ -381,7 +381,7 @@ class Transport(threading.Thread, ClosingContextManager):
         self.log_name = 'paramiko.transport'
         self.logger = util.get_logger(self.log_name)
         self.packetizer.set_log(self.logger)
-        self.auth_handler = None
+        self.auth_handler = AuthHandler(self)
         # response Message from an arbitrary global request
         self.global_response = None
         # user-defined event callbacks
@@ -1261,7 +1261,6 @@ class Transport(threading.Thread, ClosingContextManager):
         if (not self.active) or (not self.initial_kex_done):
             raise SSHException('No existing session')
         my_event = threading.Event()
-        self.auth_handler = AuthHandler(self)
         self.auth_handler.auth_none(username, my_event)
         return self.auth_handler.wait_for_response(my_event)
 
@@ -1825,8 +1824,6 @@ class Transport(threading.Thread, ClosingContextManager):
                         continue
                     elif ptype == MSG_DISCONNECT:
                         self._parse_disconnect(m)
-                        self.active = False
-                        self.packetizer.close()
                         break
                     elif ptype == MSG_DEBUG:
                         self._parse_debug(m)
@@ -1850,8 +1847,7 @@ class Transport(threading.Thread, ClosingContextManager):
                             self._log(DEBUG, 'Ignoring message for dead channel %d' % chanid) # noqa
                         else:
                             self._log(ERROR, 'Channel request for unknown channel %d' % chanid) # noqa
-                            self.active = False
-                            self.packetizer.close()
+                            break
                     elif (
                         self.auth_handler is not None and
                         ptype in self.auth_handler._handler_table

@@ -22,6 +22,8 @@
 
 import weakref
 import time
+import hashlib
+import Queue
 
 from paramiko.common import (
     cMSG_SERVICE_REQUEST, cMSG_DISCONNECT, DISCONNECT_SERVICE_NOT_AVAILABLE,
@@ -36,6 +38,7 @@ from paramiko.common import (
     cMSG_USERAUTH_GSSAPI_MIC, MSG_USERAUTH_GSSAPI_RESPONSE,
     MSG_USERAUTH_GSSAPI_TOKEN, MSG_USERAUTH_GSSAPI_ERROR,
     MSG_USERAUTH_GSSAPI_ERRTOK, MSG_USERAUTH_GSSAPI_MIC, MSG_NAMES,
+    ERROR,
 )
 from paramiko.message import Message
 from paramiko.py3compat import bytestring
@@ -69,6 +72,14 @@ class AuthHandler (object):
         # for GSSAPI
         self.gss_host = None
         self.gss_deleg_creds = True
+        # Queue for async responses, used by new authenticate
+        self.response_queue = Queue.Queue()
+        self.auth_failures = []
+        self.auth_successes = []
+        # Obscure passwords/responses with SHA1
+        self.obscure = lambda x: hashlib.sha1(x).hexdigest()
+        # For preserving old behavior, for safety reasons if nothing else
+        self.new_authenticate = False
 
     def is_authenticated(self):
         return self.authenticated
@@ -78,6 +89,210 @@ class AuthHandler (object):
             return self.auth_username
         else:
             return self.username
+
+    # One client authenticate method to rule them all...
+    # Allow a cleaner flow of the SSH autentication logic,
+    # paying heed to server supplied authentications_allowed
+    # and tracking partial authentication (MFA) until we are
+    # fully authenticated, rejected, or have run out of options.
+    def authenticate_client(self, username,
+            passwords=iter(()),
+            userkeys=iter(()),
+            interactive_callback=None,
+            preferred_order=('gssapi-keyex', 'gssapi-with-mic', 'publickey', 'keyboard-interactive', 'password')
+            ):
+        self.transport.lock.acquire()
+        self.new_authenticate = True
+        self.username = username
+        pw = iter(passwords)
+        pk = iter(userkeys)
+        if interactive_callback is None:
+            interactive_passwords = iter(passwords)
+        try:
+            # Single issue of request for ssh-userauth to start things going
+            self._request_auth()
+            mtype, m = self.response_queue.get(timeout=self.transport.auth_timeout)
+            if mtype != MSG_SERVICE_ACCEPT:
+                self.transport._log(ERROR,
+                    'Server sent unexpected response to ssh-userauth: %d',
+                    mtype)
+            self.transport._log(DEBUG, 'Service %s accepted', m.get_string())
+            # Start with an attempt at auth-none, which is not expected to
+            # succeed, but at least start with the server returning a list
+            # of avaialable authentication types to try...
+            m = Message()
+            m.add_byte(cMSG_USERAUTH_REQUEST)
+            m.add_string(username)
+            m.add_string('ssh-connection')
+            m.add_string('none')
+            self.transport._send_message(m)
+            recent_attempt = ('none',)
+
+            # Server reply expected of SUCCESS, FAILURE, or BANNER
+            # FAILURE can indicate partial success (Multi-factor Authentication)
+            # allowing us to try further attempts. BANNER is merely an informative
+            # reply, and triggers no followup request.
+            total_timeout = 0
+            while self.transport.is_active():
+                try:
+                    mtype, m = self.response_queue.get(timeout=self.transport.auth_timeout)
+                    self.transport._log(DEBUG,
+                        '<<< Got %d reply from server', mtype)
+                except Queue.Empty:
+                    #total_timeout += 1
+                    #if total_timeout <= self.transport.auth_timeout:
+                        #continue
+                    raise AuthenticationException('Failed to authenticate - server response timeout.')
+
+                total_timeout = 0
+                # self.transport._log(DEBUG, 'Receieved message type %d', mtype)
+                if mtype == MSG_USERAUTH_SUCCESS:
+                    self.transport._log(INFO, 'User authentication successful')
+                    self.authenticated = True
+                    self.auth_successes.append(recent_attempt)
+                    self.transport._auth_trigger()
+                    break
+                elif mtype == MSG_USERAUTH_BANNER:
+                    self.banner = m.get_string()
+                    self.transport._log(DEBUG,
+                        'Got banner message from Transport during authentication:\n%s',
+                        self.banner)
+                    continue
+                elif mtype == MSG_USERAUTH_INFO_REQUEST:
+                    # Depending on the last attempt, the server may respond
+                    # with a request for more info. Check the recent_attempt
+                    # tuple for what we should sensibly reply with...
+                    if recent_attempt[0] == 'keyboard-interactive':
+                        # See https://tools.ietf.org/html/rfc4256
+                        name = m.get_string()
+                        instructions = m.get_string()
+                        language_tag = m.get_string()
+                        n_prompts = m.get_int()
+                        prompts = []
+                        for i in range(n_prompts):
+                            prompts.append((m.get_string(), m.get_boolean()))
+                        self.transport._log(DEBUG,
+                            'Keyboard Interactive Request: %s [%s], with %d prompts\n%s',
+                            name, instructions, n_prompts, prompts)
+                        # If no callback is provided, try pulling prompt responses
+                        # from the passwords list, which probably only works for
+                        # length == 1.
+                        if not interactive_callback:
+                            replies = [x[0] for x in zip(interactive_passwords, range(n_prompts))]
+                        else:
+                            try:
+                                replies = interactive_callback(prompts, name=name, instructions=instructions)
+                            except Exception as e:
+                                self.transport._log(ERROR,
+                                    'Interactive callback exception: %r - disabling', repr(e))
+                                replies = []
+                        # If we don't have an appropriate length list of replies
+                        # then fabricate a server auth failure instead of sending
+                        # a bad list, as OpenSSH will just drop the connection.
+                        if len(replies) != n_prompts:
+                            mtype = MSG_USERAUTH_FAILURE
+                            m = Message()
+                            m.add_string(continue_with)
+                            m.add_boolean(False)
+                            m.rewind()
+                            self.response_queue.put((mtype, m))
+                            continue
+                        m = Message()
+                        m.add_byte(cMSG_USERAUTH_INFO_RESPONSE)
+                        m.add_int(len(replies))
+                        for resp in replies:
+                            m.add_string(resp)
+                        self.transport._log(DEBUG,
+                            'Sending %d KeyboardInteractive replies: %s', MSG_USERAUTH_INFO_RESPONSE, replies)
+                        self.transport._send_message(m)
+                        # Avoid clobbering the recent_attempt contents if we're just
+                        # sending the frivolous zero prompt response...
+                        if n_prompts:
+                            recent_attempt = ('keyboard-interactive',
+                                [(p, self.obscure(v)) for p, v in zip(prompts, replies)])
+                        continue
+                    else:
+                        raise AuthenticationException(
+                            'Unable to reply to MSG_USERAUTH_INFO_REQUEST after %s',
+                            recent_attempt[0])
+                elif mtype == MSG_USERAUTH_FAILURE:
+                    continue_with = m.get_string()
+                    partial_success = m.get_boolean()
+                    if partial_success:
+                        self.auth_successes.append(recent_attempt)
+                    else:
+                        self.auth_failures.append(recent_attempt)
+
+                    self.transport._log(DEBUG,
+                        'Server failed to authenticate previous attempt %r (partial=%s). Authentication methods that can continue: %s',
+                        recent_attempt, str(partial_success), continue_with.split(','))
+                    if not continue_with:
+                        self.transport._log(INFO,
+                            'No authentication methods allowed by server')
+                    # Try next auth method permitted by server response
+                    m = Message()
+                    m.add_byte(cMSG_USERAUTH_REQUEST)
+                    m.add_string(username)
+                    m.add_string('ssh-connection')
+                    for next_auth_method in preferred_order:
+                        if next_auth_method not in continue_with.split(','):
+                            continue
+                        if next_auth_method == 'publickey':
+                            try:
+                                pkey = next(pk)
+                                self.transport._log(DEBUG,
+                                    'Trying publickey: %s', pkey.get_base64())
+                                recent_attempt = ('publickey', pkey)
+                                m.add_string('publickey')
+                                # Build the signed blob into Message
+                                m.add_boolean(True)
+                                m.add_string(pkey.get_name())
+                                m.add_string(pkey)
+                                blob = self._get_session_blob(
+                                    pkey, 'ssh-connection', self.username)
+                                sig = pkey.sign_ssh_data(blob)
+                                m.add_string(sig)
+                                break
+                            except StopIteration:
+                                continue
+                        elif next_auth_method == 'password':
+                            try:
+                                password = next(pw)
+                                recent_attempt = ('password', self.obscure(password))
+                                m.add_string('password')
+                                m.add_boolean(False)
+                                m.add_string(password)
+                                break
+                            except StopIteration:
+                                continue
+                        elif next_auth_method == 'keyboard-interactive':
+                            recent_attempt = ('keyboard-interactive',)
+                            m.add_string('keyboard-interactive')
+                            m.add_string('')
+                            m.add_string('')
+                            break
+                        else:
+                            self.transport._log(ERROR,
+                                'Unable to handle auth method: %s', next_auth_method)
+                            raise AuthenticationException('Unknown authentication method: %s', next_auth_method)
+                    else:
+                        raise AuthenticationException('No more client authentication candidates available')
+                    self.transport._log(DEBUG,
+                        'Sending %d: Attempting authentication: %r', MSG_USERAUTH_REQUEST, recent_attempt)
+                    self.transport._send_message(m)
+                else:
+                    self.transport._log(ERROR,
+                        'Unexpected server reply during authentication: %d',
+                        mtype)
+                    raise
+        except Exception as e:
+            self.transport._log(ERROR,
+                'Unable to authenticate: %r', e)
+            raise
+            raise AuthenticationException('Failed to authenticate -  %r', e)
+        finally:
+            self.transport.lock.release()
+
 
     def auth_none(self, username, event):
         self.transport.lock.acquire()
@@ -149,6 +364,16 @@ class AuthHandler (object):
             self.transport.lock.release()
 
     def abort(self):
+        self.transport._log(DEBUG,
+            'Aborting authentication due to dropped connection')
+        # If we were in mid-conversation expecting a reply from server
+        # put a failure message on response queue.
+        if self.new_authenticate:
+            m = Message()
+            m.add_string('')
+            m.add_boolean(False)
+            m.rewind()
+            self.response_queue.put((MSG_USERAUTH_FAILURE, m))
         if self.auth_event is not None:
             self.auth_event.set()
 
@@ -230,6 +455,9 @@ class AuthHandler (object):
         self._disconnect_service_not_available()
 
     def _parse_service_accept(self, m):
+        if self.new_authenticate:
+            self.response_queue.put((MSG_SERVICE_ACCEPT, m))
+            return
         service = m.get_text()
         if service == 'ssh-userauth':
             self.transport._log(DEBUG, 'userauth is OK')
@@ -580,6 +808,9 @@ class AuthHandler (object):
         self._send_auth_result(username, method, result)
 
     def _parse_userauth_success(self, m):
+        if self.new_authenticate:
+            self.response_queue.put((MSG_USERAUTH_SUCCESS, m))
+            return
         self.transport._log(
             INFO,
             'Authentication (%s) successful!' % self.auth_method)
@@ -589,6 +820,9 @@ class AuthHandler (object):
             self.auth_event.set()
 
     def _parse_userauth_failure(self, m):
+        if self.new_authenticate:
+            self.response_queue.put((MSG_USERAUTH_FAILURE, m))
+            return
         authlist = m.get_list()
         partial = m.get_boolean()
         if partial:
@@ -614,12 +848,18 @@ class AuthHandler (object):
             self.auth_event.set()
 
     def _parse_userauth_banner(self, m):
+        if self.new_authenticate:
+            self.response_queue.put((MSG_USERAUTH_BANNER, m))
+            return
         banner = m.get_string()
         self.banner = banner
         self.transport._log(INFO, 'Auth banner: %s' % banner)
         # who cares.
 
     def _parse_userauth_info_request(self, m):
+        if self.new_authenticate:
+            self.response_queue.put((MSG_USERAUTH_INFO_REQUEST, m))
+            return
         if self.auth_method != 'keyboard-interactive':
             raise SSHException('Illegal info request from server')
         title = m.get_text()
@@ -642,6 +882,9 @@ class AuthHandler (object):
     def _parse_userauth_info_response(self, m):
         if not self.transport.server_mode:
             raise SSHException('Illegal info response from server')
+        if self.new_authenticate:
+            self.response_queue.put((MSG_USERAUTH_INFO_RESPONSE, m))
+            return
         n = m.get_int()
         responses = []
         for i in range(n):
