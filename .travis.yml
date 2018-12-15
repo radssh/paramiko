@@ -23,28 +23,33 @@ matrix:
 install:
   # Ensure modern pip/etc to avoid some issues w/ older worker environs
   - pip install pip==9.0.1 setuptools==36.6.0
-  # Grab a specific version of Cryptography if desired. Doing this before other
-  # installations ensures we don't have to do any downgrading/overriding.
-  - |
-    if [[ -n "$CRYPTO_BEFORE" ]]; then
-      pip install "cryptography<${CRYPTO_BEFORE}"
-    fi
-  # Self-install for setup.py-driven deps
-  - pip install -e .
+  # Grab a specific version of Cryptography if desired. (The 'vanilla' cells
+  # should all end up with latest public Cryptography version.)
+  # Doing this before other installations ensures we don't have to do any
+  # downgrading/overriding.
+  - "if [[ $CRYPTO == '1.1' ]]; then pip install 'cryptography<1.2'; fi"
+  - "if [[ $CRYPTO == '1.5' ]]; then pip install 'cryptography<1.6'; fi"
   # Dev (doc/test running) requirements
   # TODO: use pipenv + whatever contexty-type stuff it has
   - pip install codecov # For codecov specifically
   - pip install -r dev-requirements.txt
-script:
-  # Fast syntax check failures for more rapid feedback to submitters
-  # (Travis-oriented metatask that version checks Python, installs, runs.)
-  - inv travis.blacken
-  # I have this in my git pre-push hook, but contributors probably don't
-  - flake8
-  # All (including slow) tests, w/ coverage!
-  - inv coverage
-  # Ensure documentation builds, both sites, maxxed nitpicking
-  - inv sites
+  # Self-install for setup.py-driven deps. Comes after dev-requirements so that
+  # is able to 'pre-pin' certain libs to lower versions (eg for py2.6 support
+  # on Paramiko <2.4).
+  - pip install -e .
+script: |
+  # NOTE: the below hilarity should only exist in 2.0-2.3, 2.4+ should've gone
+  # back to vague normalcy!
+  if [[ $TRAVIS_PYTHON_VERSION == '2.6' || $TRAVIS_PYTHON_VERSION == '3.3' ]];
+  then
+    flake8
+    coverage run --source=paramiko -m pytest --verbose --color=yes
+  else
+    inv travis.blacken
+    flake8
+    inv coverage
+    inv sites
+  fi
 notifications:
   irc:
     channels: "irc.freenode.org#paramiko"
