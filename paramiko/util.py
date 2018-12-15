@@ -258,7 +258,8 @@ def log_to_file(filename, level=DEBUG):
     l.addHandler(lh)
 =======
     handler = logging.StreamHandler(f)
-    frm = "%(levelname)-.3s [%(asctime)s.%(msecs)03d] thr=%(_threadid)-3d %(name)s: %(message)s"  # noqa
+    frm = "%(levelname)-.3s [%(asctime)s.%(msecs)03d] thr=%(_threadid)-3d"
+    frm += " %(name)s: %(message)s"
     handler.setFormatter(logging.Formatter(frm, "%Y%m%d-%H:%M:%S"))
     logger.addHandler(handler)
 >>>>>>> flake8 fixes after upgrading it to 3.6.0
