@@ -245,16 +245,23 @@ def get_thread_id():
 def log_to_file(filename, level=DEBUG):
     """send paramiko logs to a logfile,
     if they're not already going somewhere"""
-    l = logging.getLogger("paramiko")
-    if len(l.handlers) > 0:
+    logger = logging.getLogger("paramiko")
+    if len(logger.handlers) > 0:
         return
-    l.setLevel(level)
+    logger.setLevel(level)
     f = open(filename, "a")
+<<<<<<< HEAD
     lh = logging.StreamHandler(f)
     frm = "%(levelname)-.3s [%(asctime)s.%(msecs)03d] thr=%(_threadid)-3d"
     frm += " %(name)s: %(message)s"
     lh.setFormatter(logging.Formatter(frm, "%Y%m%d-%H:%M:%S"))
     l.addHandler(lh)
+=======
+    handler = logging.StreamHandler(f)
+    frm = "%(levelname)-.3s [%(asctime)s.%(msecs)03d] thr=%(_threadid)-3d %(name)s: %(message)s"  # noqa
+    handler.setFormatter(logging.Formatter(frm, "%Y%m%d-%H:%M:%S"))
+    logger.addHandler(handler)
+>>>>>>> flake8 fixes after upgrading it to 3.6.0
 
 
 # make only one filter object, so it doesn't get applied more than once
@@ -268,9 +275,9 @@ _pfilter = PFilter()
 
 
 def get_logger(name):
-    l = logging.getLogger(name)
-    l.addFilter(_pfilter)
-    return l
+    logger = logging.getLogger(name)
+    logger.addFilter(_pfilter)
+    return logger
 
 
 def retry_on_signal(function):
