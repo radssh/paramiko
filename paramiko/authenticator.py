@@ -653,7 +653,7 @@ class AuthGSSAPI(AuthMethod):
             self.mech = m.get_string()
             self.authenticator._log(DEBUG, "Server mechanism: {}".format(binascii.hexlify(self.mech)))
             token = self.sshgss.ssh_init_sec_context(
-                self.authenticator.transport.hostname, # self.gss_host,
+                self.authenticator.transport.gss_host, # self.gss_host,
                 self.mech,
                 self.authenticator.username)
             m = Message()
@@ -666,7 +666,7 @@ class AuthGSSAPI(AuthMethod):
             srv_token = m.get_string()
             self.authenticator._log(DEBUG, "Server reply with GSSAPI Token: {}".format(binascii.hexlify(srv_token)))
             next_token = self.sshgss.ssh_init_sec_context(
-                self.authenticator.transport.hostname, # self.gss_host,
+                self.authenticator.transport.gss_host, # self.gss_host,
                 self.mech,
                 self.authenticator.username,
                 srv_token)
