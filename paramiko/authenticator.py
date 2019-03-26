@@ -318,14 +318,8 @@ class AuthMethod(object):
     """
     method_name = "auth_none"
 
-    def __init__(self, authenticator, *args):
+    def __init__(self, authenticator):
         self.authenticator = authenticator
-        self.additional_args(*args)
-
-    # Should override
-    def additional_args(self, *args):
-        if args:
-            raise AuthenticationException("{}: no additional args supported".format(self.method_name))
 
     def message(self, *args):
         m = Message()
@@ -365,7 +359,8 @@ AuthNone = AuthMethod
 class AuthPassword(AuthMethod):
     method_name = "password"
 
-    def additional_args(self, password):
+    def __init__(self, authenticator, password):
+        AuthMethod.__init__(authenticator)
         if password is not None:
             self.password = password
             return
@@ -403,7 +398,8 @@ class AuthPassword(AuthMethod):
 class AuthKeyboardInteractive(AuthMethod):
     method_name = "keyboard-interactive"
 
-    def additional_args(self, *args):
+    def __init__(self, authenticator, *args):
+        AuthMethod.__init__(authenticator)
         # args can be a sequence of (regex, string) pairs to be used
         # as a reply-bot, before (possibly) falling back to actually
         # doing an interactive prompt with keyboard input.
@@ -471,7 +467,8 @@ class AuthKeyboardInteractive(AuthMethod):
 class AuthPublicKey(AuthMethod):
     method_name = "publickey"
 
-    def additional_args(self, pkey):
+    def __init__(self, authenticator, pkey):
+        AuthMethod.__init__(self, authenticator)
         # Accept PKey type (not filename)
         self.pkey = pkey
         self.sign_data = False
@@ -588,7 +585,8 @@ class AuthGSSAPI(AuthMethod):
     # RFC4462 - GSSAPI Authentication
     method_name = "gssapi-with-mic"
 
-    def additional_args(self, *args):
+    def __init__(self, authenticator, *args):
+        AuthMethod.__init__(authenticator)
         self.sshgss = GSSAuth(self.method_name, self.authenticator.ssh_config.get("gssapidelegatecredentials") == "yes")
         self.mech = None
 
@@ -611,14 +609,14 @@ class AuthGSSAPI(AuthMethod):
             # Server passed the selected mechanism (OID)
             self.mech = m.get_string()
             self.authenticator._log(DEBUG, "Server mechanism: {}".format(binascii.hexlify(self.mech)))
-            ctx = self.sshgss.ssh_init_sec_context(
+            token = self.sshgss.ssh_init_sec_context(
                 self.authenticator.transport.hostname, # self.gss_host,
                 self.mech,
                 self.authenticator.username)
             m = Message()
             m.add_byte(cMSG_USERAUTH_GSSAPI_TOKEN)
-            m.add_string(ctx)
-            self.authenticator._log(DEBUG, "GSSAPI Token generated from ssh_init_sec_context(): {}".format(binascii.hexlify(ctx)))
+            m.add_string(token)
+            self.authenticator._log(DEBUG, "GSSAPI Token generated from ssh_init_sec_context(): {}".format(binascii.hexlify(token)))
             return m
         if ptype == MSG_USERAUTH_GSSAPI_TOKEN:
             # Reprocess context with supplied token from server

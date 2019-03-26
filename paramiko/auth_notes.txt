@@ -1,0 +1,60 @@
+Change summary for auth_wip do-over of legacy AuthHandler
+
+Separate out the client authentication flow from the individual
+authentication methods. The flow, described in RFC4252 establishes
+the SSH Authentication layer between the Transport and Connection
+layers. While somewhat vague per the RFCs, servers do not permit
+clients to request ssh-connection service directly, but instead
+enable the ssh-connection service once the user authentication
+phase is completed successfully.
+
+Because the authentication protocol does not follow a strict sequence of
+steps, and each step may involve different authentication mechanisms, in no
+predetermined order, it can be difficult to adapt to a typical programmatic
+sequence of steps. For example, sending a username/password may not be
+sufficient, or might even be disallowed at the time the client (script)
+chooses to send it. The server may be configured to require public key
+authentication or other non-password based authentication such as a
+time-based token (GoogleAuthenticator/Yubi) prior to progressing to
+accepting a password.
+
+The legacy AuthHandler model required the client portion to exclusively
+use single authentication calls (Try this password/Try this key/etc) to
+drive the authentication, instead of a mutual cooperation between client
+and server. Further complicating code maintainability is the need to
+internally morph the AuthHandler to accomodate the dynamic authentication
+methods, and inability to sanely preserve state during the process, as
+in some cases, the AuthHandler object would need to be reinstantiated.
+
+This reimplementation is an attempt to consolidate the authentication flow
+into a simpler, unified flow, and segregate out the individual Authentication
+methods into compact, easier to maintain class objects.
+
+Significant effort is made to preserve high-level backward compatibility
+with existing code, but due to the general architecture of the new flow, not
+all low-level underpinnings will be retained. Sorry.
+
+Overview of Class changes:
+Authenticator is intended to be an enhanced replacement for the legacy
+AuthHandler class, for client authentication to a server. Server side
+authentication of clients may be added at a later date, probably as a
+distinct class, as the process flow behavior is significantly different.
+
+The expected interaction, from the client side differs somewhat from
+the legacy AuthHandler. Instead of requiring the client to explicitly make
+calls to specific authentication methods, the Authenticator keeps track of
+a more comprehensive suite of available authentication methods and parameters
+to try, and the client need only call one "authenticate()" function to start
+(and ideally, complete) the user authentication phase. If the process fails
+to successfully authenticate the Transport, the client can offer subsequent
+attempts either as a followup suite, or with individual single-method calls
+as in the legacy AuthHandler. It is fully expected that the initial available
+suite can be adequately assembled in such a way that subsequent calls will
+not be necessary, except for permitting existing legacy code (that does not
+call "authenticate()" at all) to still authenticate.
+
+The capability of client getting asynchronous notification of stage completion
+via Python Event objects is deprecated. Since an unauthenticated Transport is
+not useful by itself prior to successful user authentication, the asynchronous
+notification will not be supported. If clients do pass Events, they will be
+signaled at the end of processing, but not asynchronously.
