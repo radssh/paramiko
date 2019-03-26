@@ -52,6 +52,7 @@ from paramiko.common import (
     cMSG_USERAUTH_BANNER, MSG_USERAUTH_INFO_REQUEST, cMSG_USERAUTH_INFO_RESPONSE
 )
 from paramiko.ssh_exception import AuthenticationException
+from paramiko.ssh_gss import GSSAuth, GSS_EXCEPTIONS
 
 class Authenticator(object):
     """
@@ -165,6 +166,7 @@ class Authenticator(object):
                 self.ssh_config[k] = ",".join(val)
             else:
                 self.ssh_config[k] = v
+        self._log(DEBUG, self.ssh_config)
 
     def queue_server_response(self, ptype, m):
         # Used by Transport thread to pass messages from server
@@ -215,6 +217,7 @@ class Authenticator(object):
                 self.available_methods["password"] = AuthPassword.factory(self, *self.password_list)
             self.available_methods["publickey"] = AuthPublicKey.factory(self, *self.key_list)
             self.available_methods["keyboard-interactive"] = AuthKeyboardInteractive.factory(self, ('Password(?i)', 'bongo'))
+            self.available_methods["gssapi-with-mic"] = AuthGSSAPI.factory(self)
 
         self.transport.lock.acquire()
         try:
@@ -238,6 +241,7 @@ class Authenticator(object):
                 self.in_progress = True
                 current_auth = AuthNone(self)
                 self.transport._send_message(current_auth.message())
+                self._log(DEBUG, "Sent auth-none")
             else:
                 self._log(DEBUG, "Resuming {} processing".format(self.service_name))
                 current_auth = "placebo"
@@ -245,6 +249,8 @@ class Authenticator(object):
 
             while self.in_progress:
                 ptype, m = self.server_reply.get(timeout=self.auth_timeout)
+                self._log(DEBUG, "Got reply from server: {:d}".format(ptype))
+
                 if ptype == MSG_USERAUTH_SUCCESS:
                     self._log(INFO, "Authentication success!")
                     self.authenticated = True
@@ -577,3 +583,62 @@ class AuthPublicKey(AuthMethod):
             keyname = self.pkey.get_name()
         return "{} - {}".format(keyname, binascii.hexlify(self.pkey.get_fingerprint()))
             #  ':'.join(["{:02x}".format(ord(x)) for x in self.pkey.get_fingerprint()]))
+
+class AuthGSSAPI(AuthMethod):
+    # RFC4462 - GSSAPI Authentication
+    method_name = "gssapi-with-mic"
+
+    def additional_args(self, *args):
+        self.sshgss = GSSAuth(self.method_name, self.authenticator.ssh_config.get("gssapidelegatecredentials") == "yes")
+        self.mech = None
+
+    def _append_message(self, m):
+        m.add_bytes(self.sshgss.ssh_gss_oids())
+
+    @classmethod
+    def factory(cls, authenticator, *args):
+        # Support only for Kerberos based GSS method, so only one OID
+        try:
+            yield cls(authenticator)
+        except Exception as e:
+            authenticator._log(INFO, "GSSAPI failure - {}".format(str(e)))
+
+    def __str__(self):
+        return "GSSAPI (with MIC) using Kerberos"
+
+    def additional_info(self, ptype, m):
+        if ptype ==  MSG_USERAUTH_GSSAPI_RESPONSE:
+            # Server passed the selected mechanism (OID)
+            self.mech = m.get_string()
+            self.authenticator._log(DEBUG, "Server mechanism: {}".format(binascii.hexlify(self.mech)))
+            ctx = self.sshgss.ssh_init_sec_context(
+                self.authenticator.transport.hostname, # self.gss_host,
+                self.mech,
+                self.authenticator.username)
+            m = Message()
+            m.add_byte(cMSG_USERAUTH_GSSAPI_TOKEN)
+            m.add_string(ctx)
+            self.authenticator._log(DEBUG, "GSSAPI Token generated from ssh_init_sec_context(): {}".format(binascii.hexlify(ctx)))
+            return m
+        if ptype == MSG_USERAUTH_GSSAPI_TOKEN:
+            # Reprocess context with supplied token from server
+            srv_token = m.get_string()
+            self.authenticator._log(DEBUG, "Server reply with GSSAPI Token: {}".format(binascii.hexlify(srv_token)))
+            next_token = self.sshgss.ssh_init_sec_context(
+                "", # self.gss_host,
+                self.mech,
+                self.authenticator.username,
+                srv_token)
+            if next_token:
+                m = Message()
+                m.add_byte(cMSG_USERAUTH_GSSAPI_TOKEN)
+                m.add_string(next_token)
+                self.authenticator._log(DEBUG, "Client answer with GSSAPI Token: {}".format(binascii.hexlify(next_token)))
+                return m
+            m = Message()
+            m.add_byte(cMSG_USERAUTH_GSSAPI_MIC)
+            mic = self.sshgss.ssh_get_mic(self.authenticator.transport.session_id)
+            m.add_string(mic)
+            self.authenticator._log(DEBUG, "Client finishing with GSSAPI MIC: {}".format(binascii.hexlify(mic)))
+            return m
+        raise AuthenticationException("Unexpected message type for {}: {:d}".format(self.method_name, ptype))
