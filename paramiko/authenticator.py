@@ -108,6 +108,7 @@ class Authenticator(object):
         "gssapidelegatecredentials": "no",
         # "hostbasedkeytypes": "",
         "identitiesonly": "no",
+        "identityagent": "SSH_AUTH_SOCK",
         "kbdinteractivedevices": "",
         "numberofpasswordprompts": "3",
         # "pkcs11provider": "", # TBD
@@ -221,6 +222,14 @@ class Authenticator(object):
             self.available_methods["publickey"] = AuthPublicKey.factory(self, *self.key_list)
             self.available_methods["keyboard-interactive"] = AuthKeyboardInteractive.factory(self, ('Password(?i)', 'bongo'))
             self.available_methods["gssapi-with-mic"] = AuthGSSAPI.factory(self)
+        ssh_agent = self.ssh_config.get("identityagent", "SSH_AUTH_SOCK")
+        if ssh_agent == "none" and "SSH_AUTH_SOCK" in os.environ:
+            os.environ.pop("SSH_AUTH_SOCK")
+            self._log(DEBUG, "Disabling ssh-agent key lookups (IdentityAgent none)")
+        elif ssh_agent != "SSH_AUTH_SOCK":
+            os.environ["SSH_AUTH_SOCK"] = ssh_agent
+            self._log(DEBUG, "Redirecting ssh-agent key lookups (IdentityAgent {})".format(ssh-agent))
+
 
         self.transport.lock.acquire()
         try:

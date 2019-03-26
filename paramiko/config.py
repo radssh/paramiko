@@ -207,6 +207,15 @@ class SSHConfig (object):
                             ('%u', user),
                             ('%r', remoteuser)
                         ],
+                        'identityagent':
+                        [
+                            ('~', homedir),
+                            ('%d', homedir),
+                            ('%h', config['hostname']),
+                            ('%l', fqdn),
+                            ('%u', user),
+                            ('%r', remoteuser)
+                        ],
                         'proxycommand':
                         [
                             ('~', homedir),
