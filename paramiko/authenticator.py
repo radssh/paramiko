@@ -63,21 +63,26 @@ class Authenticator(object):
     - Instantiate with a handle onto a `Transport` object. This object must
       already have been prepared for authentication by calling
       `Transport.start_client`.
-    - Call the instance's `authenticate_with_kwargs` method with as many or few
-      auth-source keyword arguments as needed, which will:
-        - attempt to authenticate in a documented order of preference
-        - if successful, return an `AuthenticationResult`
-        - if unsuccessful or if additional auth factors are required, raise an
-          `AuthenticationException` (or subclass thereof) which will exhibit a
-          ``.result`` attribute whose value is an `AuthenticationResult`.
-        - either way, the point is that the caller will have access to an
-          `AuthenticationResult` object exposing the various auth sources
-          tried, what order they were tried in, and what the result was.
+    - Call the instance's `authenticate` method, which will make use of
+      one or more available authentication methods managed by the Authenticator
+      object itself. The authenticate() call will:
+        - attempt to authenticate in a server-driven order of preference
+        - if successful, return `True`
+        - if unsuccessful or if additional auth factors are required, return
+          `False` (typically) or raise an `AuthenticationException` (or
+          subclass thereof) which will convey details of complications
+          encountered. The distinction is that False should be returned in
+          situations where the client/server communication is behaving fine,
+          but the server declines the various authentication attempts being
+          offered. `AuthenticationException` should be raised only if there
+          was a more unusual event occurring during processing.
+        - either way, the point is that the caller will have authenticated
+          successfully, have an unauthenticated `Transport` to continue
+          authentication attempts via other method(s).
         - see API docs for `authenticate` for further details.
     - Alternately, for tighter control of which auth sources are tried and in
-      what order, call `authenticate` directly (it's what implements the guts
-      of `authenticate_with_kwargs`) which foregoes most kwargs in lieu of an
-      iterable containing `AuthSource` objects.
+      what order, call `auth_$method` components directly, following the model
+      of the legacy `AuthHandler`, for true backward compatibility.
     """
     service_name = "ssh-userauth"
 
@@ -109,9 +114,12 @@ class Authenticator(object):
         # "pubkeyacceptedkeytypes": "",
     }
 
-    def __init__(self, transport, username=None,
-            default_password='', keyfile_or_key=None, passphrase='',
-            auth_timeout=15):
+    def __init__(self,
+            transport,
+            username=None,
+            default_password=None,
+            keyfile_or_key=None,
+            passphrase=None):
         # TODO: probably sanity check transport state and bail early if it's
         # not ready.
         # TODO: consider adding some more of SSHClient.connect (optionally, if
@@ -119,8 +127,8 @@ class Authenticator(object):
         # .start_client; then update lifecycle in docstring.
         self.transport = transport
         self._log = transport._log
-        self.username = username or self.ssh_config["user"]
-        if default_password:
+        self.username = username
+        if default_password is not None:
             self.password_list = [default_password]
         else:
             self.password_list = []
@@ -130,14 +138,20 @@ class Authenticator(object):
         else:
             self.key_list = []
         self.passphrase = passphrase
-        # Time to wait for server reply (for each send, not total time)
-        self.auth_timeout = auth_timeout
         # State of authentication
         self.server_reply = Queue.Queue()
         self.authenticated = False
         self.in_progress = False
+        self.server_accepts = ['none'] # Pending initial auth_none
         # Temporary, for backward compatibility with legacy AuthHandler
+        def makeshift_handler(ptype):
+            def fn(m):
+                self.server_reply.put((ptype, m))
+            return fn
         self._handler_table = {}
+        for ptype in range():
+            self._handler_table[ptype] = makeshift_handler(ptype)
+
 
     def update_authentication_options(self, d):
         """
@@ -168,11 +182,6 @@ class Authenticator(object):
                 self.ssh_config[k] = v
         self._log(DEBUG, self.ssh_config)
 
-    def queue_server_response(self, ptype, m):
-        # Used by Transport thread to pass messages from server
-        # to the running authentication thread.
-        self.server_reply.put((ptype, m))
-
     def is_authenticated(self):
         return self.authenticated
 
@@ -183,21 +192,11 @@ class Authenticator(object):
             # continue, so we don't block on reading response that might not
             # get delivered, due to disconnect.
             m = Message()
-            m.add_string("disconnected")
+            m.add_string("aborted")
             m.add_boolean(False)
             m.rewind()
-            self.queue_server_response(MSG_USERAUTH_FAILURE, m)
+            self.server_reply.put((MSG_USERAUTH_FAILURE, m))
             self.in_progress = False
-
-    def authenticate_with_kwargs(self, lots_o_kwargs_here):
-        # Basically SSHClient._auth signature...then calls
-        # sources_from_kwargs() and stuffs result into authenticate()?
-        # TODO: at the start, just copypasta/tweak SSHClient._auth so the
-        # break-up is tested; THEN move to the newer cleaner shit?
-        # TODO: this is probably a good spot to reject the
-        # password-as-passphrase bit; accept distinct kwargs and require
-        # SSHClient to implement the fallback on its end.
-        pass
 
     def authenticate(self, force_service_request=False, explicit_methods=None):
         # TODO: define AuthSource (maybe rename...lol), should be lightweight,
@@ -206,6 +205,10 @@ class Authenticator(object):
         # handles multi-factor auth much better than the current shite
         # trickledown. (Be very TDD here...! Perhaps wait until single-source
         # tests all pass first, then can ensure they continue to do so?)
+
+        # Set the username from ssh_config, if not already set at __init__()
+        if self.username is None:
+             self.username = self.ssh_config["user"]
         if explicit_methods:
             self.available_methods = explicit_methods
         else:
@@ -230,7 +233,7 @@ class Authenticator(object):
                 m.add_string(self.service_name)
                 self.transport._send_message(m)
                 # Server expected to reply with MSG_SERVICE_ACCEPT
-                resp = self.server_reply.get(timeout=self.auth_timeout)
+                resp = self.server_reply.get(timeout=self.transport.auth_timeout)
                 ptype, m = resp
                 if ptype != MSG_SERVICE_ACCEPT:
                     raise AuthenticationException("Expected cMSG_SERVICE_ACCEPT(6), but got {:d}".format(ptype))
@@ -239,6 +242,7 @@ class Authenticator(object):
                     raise AuthenticationException("Unexpected service name: expected {}, got {}".format(self.service_name, service_name))
                 self._log(DEBUG, "Server accepted {} request".format(self.service_name))
                 self.in_progress = True
+            if self.server_accepts and self.server_accepts[0] == 'none':
                 current_auth = AuthNone(self)
                 self.transport._send_message(current_auth.message())
                 self._log(DEBUG, "Sent auth-none")
@@ -255,6 +259,7 @@ class Authenticator(object):
                     self._log(INFO, "Authentication success!")
                     self.authenticated = True
                     self.in_progress = False
+                    self.transport._auth_trigger()
                     break
                 elif ptype == MSG_USERAUTH_BANNER:
                     banner = m.get_text()
@@ -263,13 +268,13 @@ class Authenticator(object):
                     self.transport.banner = banner
                     continue
                 elif ptype == MSG_USERAUTH_FAILURE:
-                    server_accepts = m.get_text().split(',')
+                    self.server_accepts = m.get_text().split(',')
                     partial_success = m.get_boolean()
                     if partial_success:
                         self._log(INFO, "Authentication {} partial success".format(current_auth))
                     else:
                         self._log(INFO, "Authentication {} failed".format(current_auth))
-                    self._log(DEBUG, "Authentications that can continue: {}".format(",".join(server_accepts)))
+                    self._log(DEBUG, "Authentications that can continue: {}".format(",".join(self.server_accepts)))
                 else:
                     # Anything other than general authentication messages should
                     # be handled by the specific AuthMethod object
@@ -284,7 +289,7 @@ class Authenticator(object):
                 # Pick another (compatible) AuthMethod
                 for method in self.ssh_config["preferredauthentications"].split(","):
                     if (method in self.available_methods and
-                        method in server_accepts):
+                        method in self.server_accepts):
                         try:
                             current_auth = next(self.available_methods[method])
                             self._log(DEBUG, "Next authentication method: {}".format(current_auth))
@@ -294,34 +299,35 @@ class Authenticator(object):
                             self._log(DEBUG, "No more {} attempts available".format(method))
                 else:
                     self._log(INFO, "Client has run out of authentication methods")
-                    raise AuthenticationException("Client has run out of authentication methods")
+                    # raise AuthenticationException("Client has run out of authentication methods")
+                    return False
         except Exception as e:
             self._log(ERROR, "Exception in authenticate(): {!r}".format(e))
             exc_type, exc_value, exc_traceback = sys.exc_info()
             self._log(DEBUG, traceback.format_exc())
+            raise
         finally:
             self.transport.lock.release()
         return self.authenticated
 
-    def sources_from_kwargs(self, kwargs):
-        # TODO: **kwargs? whatever, this is mostly internal
-        # TODO: this should implement, and document, the current (and/or then
-        # desired) way that a pile of kwargs becomes an ordered set of
-        # attempted auths...
-        pass
-
 
 class AuthMethod(object):
     """
-    Class for ssh (client) user authentication. Implements the "auth_none"
+    Base class for ssh (client) user authentication. Implements the "auth_none"
     method, but can be used as a base class for other authentication types.
     """
-    method_name = "auth_none"
+    method_name = "auth_method"
 
+    # Must override
     def __init__(self, authenticator):
         self.authenticator = authenticator
+        # Base class only - do not use directly
+        raise AuthenticationException("AuthMethod should not be used directly - use one of (AuthPassword, AuthPublicKey, etc.) instead")
 
     def message(self, *args):
+        # Build the start of a USERAUTH_REQUEST message, then pass it to
+        # the derived class _append_message() to complete. This is the
+        # initial request starting a new authentication method attempt.
         m = Message()
         m.add_byte(cMSG_USERAUTH_REQUEST)
         m.add_string(self.authenticator.username)
@@ -330,12 +336,12 @@ class AuthMethod(object):
         self._append_message(m)
         return m
 
-    # Should override
+    # Must override
     def _append_message(self, m):
-        # No additional message fields for auth_none
-        return
+        raise AutheticationException("AuthMethod._append_message() should not be used directly")
 
-    # Should override
+    # Should override, if any SSH AdditionalInfo messages are defined
+    # for this AuthMethod
     def additional_info(self, ptype, m):
         # Continue dialog with server - varies based on authentication type
         # Should return a Message object if able to respond intelligently,
@@ -353,8 +359,19 @@ class AuthMethod(object):
     def __str__(self):
         return self.method_name
 
-AuthNone = AuthMethod
+class AuthNone(AuthMethod):
+    # Borderline trivial build on top of base class, as there are no
+    # additional fields to populate in the request message, and no
+    # defined followup responses. auth_none is not expected to succeed
+    # (although it might), but can be useful to safely get the server
+    # to respond with the list of allowed authentication methods.
+    method_name = "auth_none"
 
+    def __init__(self, authenticator):
+        self.authenticator = authenticator
+
+    def _append_message(self, m):
+        return
 
 class AuthPassword(AuthMethod):
     method_name = "password"
@@ -382,6 +399,7 @@ class AuthPassword(AuthMethod):
 
     @classmethod
     def factory(cls, authenticator, *args):
+        # Zero or more pre-filled passwords
         for pw in args:
             yield cls(authenticator, pw)
         # After trying listed passwords, can include interactive
@@ -391,6 +409,8 @@ class AuthPassword(AuthMethod):
                 yield cls(authenticator, None)
 
     def __str__(self):
+        # Obfuscate the password for simpler early debugging
+        # Long term, probably don't want to even divulge the hashed password
         hash = hashlib.sha1(self.password.encode())
         return "Password:SHA1({})".format(hash.hexdigest())
 
@@ -488,6 +508,10 @@ class AuthPublicKey(AuthMethod):
             m.add_string(sig)
 
     def _get_session_blob(self, key, service, username):
+        # This constructed message is not actually passed, but instead
+        # built on the client side for signing, then the server side
+        # independently constructs this same message content in order
+        # to validate the signature
         m = Message()
         m.add_string(self.authenticator.transport.session_id)
         m.add_byte(cMSG_USERAUTH_REQUEST)
@@ -583,6 +607,12 @@ class AuthPublicKey(AuthMethod):
 
 class AuthGSSAPI(AuthMethod):
     # RFC4462 - GSSAPI Authentication
+    # Client offers a list of OIDs (currently only support KRB5)
+    # If the server accepts, then the client comutes a token using
+    # `ssh_init_sec_context()` and responds to the server with that
+    # token. The server may continue offering updated tokens until the
+    # client arrives at an empty token, at which point it passes back
+    # the derived Message Integrity Code (MIC) for the session.
     method_name = "gssapi-with-mic"
 
     def __init__(self, authenticator, *args):
@@ -605,6 +635,19 @@ class AuthGSSAPI(AuthMethod):
         return "GSSAPI (with MIC) using Kerberos"
 
     def additional_info(self, ptype, m):
+        if ptype == MSG_USERAUTH_GSSAPI_ERRTOK:
+            # Log the error, and move on...
+            error_token = m.get_text()
+            self.authenticator._log(ERROR, "GSSAPI Error Token received: {}".format(error_token))
+            # Server should follow with MSG_USERAUTH_FAILURE, so don't reply with a message here
+            return None
+        if ptype == SSH_MSG_USERAUTH_GSSAPI_ERROR:
+            maj_status = m.get_int()
+            min_status = m.get_int()
+            err_msg = m.get_string()
+            self.authenticator._log(ERROR, "GSSAPI Error: {:d}/{:d} {}".format(maj_status, min_status, err_msg))
+            # Server should follow with MSG_USERAUTH_FAILURE, so don't reply with a message here
+            return None
         if ptype ==  MSG_USERAUTH_GSSAPI_RESPONSE:
             # Server passed the selected mechanism (OID)
             self.mech = m.get_string()
@@ -623,7 +666,7 @@ class AuthGSSAPI(AuthMethod):
             srv_token = m.get_string()
             self.authenticator._log(DEBUG, "Server reply with GSSAPI Token: {}".format(binascii.hexlify(srv_token)))
             next_token = self.sshgss.ssh_init_sec_context(
-                "", # self.gss_host,
+                self.authenticator.transport.hostname, # self.gss_host,
                 self.mech,
                 self.authenticator.username,
                 srv_token)
@@ -640,3 +683,35 @@ class AuthGSSAPI(AuthMethod):
             self.authenticator._log(DEBUG, "Client finishing with GSSAPI MIC: {}".format(binascii.hexlify(mic)))
             return m
         raise AuthenticationException("Unexpected message type for {}: {:d}".format(self.method_name, ptype))
+
+
+class AuthGSSAPI_Keyex(AuthMethod):
+    # RFC4462 - GSSAPI Authentication
+    # Simpler mechanism than gssapi-with-mic, but can only be used
+    # if the earlier SSH Key Exchange done by `Transport` used GSS
+    # for the key exchange. In this case, a GSS context exists that
+    # may be permitted, provided the client offers the MIC for that
+    # existing context.
+    method_name = "gssapi-keyex"
+
+    def __init__(self, authenticator, *args):
+        AuthMethod.__init__(authenticator)
+        if not authenticator.transport.gss_kex_used:
+            raise AuthenticationException("gssapi-keyex cannot be used because initial key exchange was not done via GSS")
+
+    def _append_message(self, m):
+        kexgss = self.transport.kexgss_ctxt
+        kexgss.set_username(self.username)
+        mic_token = kexgss.ssh_get_mic(self.authenticator.transport.session_id)
+        m.add_string(mic_token)
+
+    @classmethod
+    def factory(cls, authenticator, *args):
+        # Support only for single attempt, per RFC4462
+        try:
+            yield cls(authenticator)
+        except Exception as e:
+            authenticator._log(INFO, "GSSAPI-keyex failure - {}".format(str(e)))
+
+    def __str__(self):
+        return "GSSAPI (keyex)"

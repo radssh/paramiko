@@ -1903,10 +1903,6 @@ class Transport(threading.Thread, ClosingContextManager):
                         else:
                             self._log(ERROR, 'Channel request for unknown channel {:d}'.format(chanid)) # noqa
                             break
-                    elif (self.auth_handler is not None and
-                        not self.auth_handler.is_authenticated() and
-                        hasattr(self.auth_handler, 'queue_server_response')):
-                        self.auth_handler.queue_server_response(ptype, m)
                     elif (
                         self.auth_handler is not None and
                         ptype in self.auth_handler._handler_table

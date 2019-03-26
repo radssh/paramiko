@@ -58,3 +58,73 @@ via Python Event objects is deprecated. Since an unauthenticated Transport is
 not useful by itself prior to successful user authentication, the asynchronous
 notification will not be supported. If clients do pass Events, they will be
 signaled at the end of processing, but not asynchronously.
+
+BadAuthenticationType and PartialAuthenticaiton exceptions will not be used
+by the new Authenticator mechanism. Calls to "authenticate()", or
+replacement "auth_xxxx()" methods should typically return True on successful
+authentication (and set the Transport.authenticated attribute) or False,
+indicating that the attempt(s) to authenticate have left the Transport in a
+still unauthenticated state. In rare exceptions, AuthenticationException
+can be raised, with detailed information included. Since the process flow
+avoids the morphing behavior of AuthHandler, the construct for raising
+deferred or saved_exceptions is also eliminated.
+
+Much of the twiddling of low level options are now driven from OpenSSH
+client configuration options, and can be updated with a single call passing
+a dict with the options. For ease of use, the dict is expected to primarily
+be the result of paramiko.SSHConfig.lookup(host) so these option settings can
+be common between Paramiko and the ssh command line client. Manual construction
+of the dict is also possible. Only the default setting for BatchMode deviates
+from recent OpenSSH defaults, per "man ssh_config", as disabling user prompting
+seems a more appropriate choice, based on existing Paramiko code.
+
+
+Detailed Coding Comments (walkthrough of auth_handler)
+Authenticator.__init__() takes transport parameter (as AuthHandler does), but
+adds optional convenience parameters for username (SSH does not permit changing
+username mid-authentication, so it does not make sense to require username
+passed in to each individual authentication method) which defaults to the
+current login user, as well as a password, key (PKey or filename) and passphrase
+to use if the key is passed as a filename and requires a passphrase to decrypt.
+In the cases where a password or key is sufficient to authenticate the user,
+the client code can simply instantiate the Authenticator with the username
+and password (or key), and call "authenticate()". Old style look_for_keys
+and allow_agent options are not supported, but can be mimicked by the
+OpenSSH configuration options IdentityFile, IdentitiesOnly, and IdentityAgent.
+
+Authenticator retains a class member dict `ssh_options` holding default values
+for authentication options. This is a subset of the OpenSSH client options,
+and can be updated via `update_authentication_options` with a dict (ideally
+from `paramiko.SSHConfig.lookup()`). This should effectively cover most of
+the tweaking that would be handled by `authenticate_with_kwargs()`.
+
+A new base class `AuthMethod` is constucted that handles the core basics
+necessary to attempt one mechanism (combined with one set of parameters
+specific to that particular mechanism). All `AuthMethod` objects should take
+the first parameter as the reference to the parent `Authenticator`, and should
+optionally list additional parameters specific to the implemented method:
+a password for `AuthPassword`, a `PKey` for `AuthPublicKey`, etc.
+
+Each implemented AuthMethod should also provide a (@classmethod) factory
+callable to be used as an iterator to produce variations of usable AuthMethod
+objects to be attempted for a given authentication mechanism. The flow
+of `authenticate()` will make use of each produced AuthMethod. For example,
+the AuthPassword factory can generate objects based on a provided list of
+passwords to try, and if that list is fully consumed, fall back to
+ineractively prompting for password at the console (conditional on the
+setting of ssh_config `BatchMode` option). Similarly, keys (and certificates)
+can be listed as filenames (or actual PKeys) based on settings such as
+`IdentityFile` to produce a sensible sequence of keys to attempt. The provided
+factory methods are intended to represent typical OpenSSH client behavior;
+custom coded iterators can be used to drive the `authenticate()` process.
+
+To drive the `authenticate()` processing, a local dict is prepared with
+key lookups based on auth_method names, with the various AuthMethod iterators.
+Like OpenSSH, the Authenticator will choose the next method name, as per the
+client's `PreferredAuthentications` list, as long as that method name is
+present in the dict, is included in the server's "can continue" list *(unless
+the dict was explicitly supplied to `authenticate()`), and the iterator's
+`next()` call returns a usable AuthMethod. Once selected as the current
+AuthMethod, the initial `USERAUTH_REQUEST` is sent, with the `Authenticator`
+handling responses of Success/Failure/Banner, with any other response
+message being passed along to the specific AuthMethod.
