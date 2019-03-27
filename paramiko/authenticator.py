@@ -146,12 +146,13 @@ class Authenticator(object):
         self.server_accepts = ['none'] # Pending initial auth_none
         # Temporary, for backward compatibility with legacy AuthHandler
         def makeshift_handler(ptype):
-            def fn(m):
+            def fn(self, m):
                 self.server_reply.put((ptype, m))
             return fn
         self._handler_table = {}
-        for ptype in range():
+        for ptype in range(MSG_USERAUTH_REQUEST, 79): # HIGHEST_USERAUTH_MESSAGE_ID
             self._handler_table[ptype] = makeshift_handler(ptype)
+        self._handler_table[MSG_SERVICE_ACCEPT] = makeshift_handler(MSG_SERVICE_ACCEPT)
 
 
     def update_authentication_options(self, d):
@@ -261,7 +262,10 @@ class Authenticator(object):
                 raise NotImplemented
 
             while self.in_progress:
-                ptype, m = self.server_reply.get(timeout=self.auth_timeout)
+                try:
+                    ptype, m = self.server_reply.get(timeout=self.transport.auth_timeout)
+                except Queue.Empty:
+                    raise AuthenticationException("Server reply timeout during authentication")
                 self._log(DEBUG, "Got reply from server: {:d}".format(ptype))
 
                 if ptype == MSG_USERAUTH_SUCCESS:
@@ -325,13 +329,14 @@ class AuthMethod(object):
     Base class for ssh (client) user authentication. Implements the "auth_none"
     method, but can be used as a base class for other authentication types.
     """
-    method_name = "auth_method"
+    method_name = "AuthMethodBase"
 
     # Must override
     def __init__(self, authenticator):
         self.authenticator = authenticator
         # Base class only - do not use directly
-        raise AuthenticationException("AuthMethod should not be used directly - use one of (AuthPassword, AuthPublicKey, etc.) instead")
+        if self.method_name == "AuthMethodBase":
+            raise AuthenticationException("AuthMethod should not be used directly - use one of (AuthPassword, AuthPublicKey, etc.) instead")
 
     def message(self, *args):
         # Build the start of a USERAUTH_REQUEST message, then pass it to
@@ -377,7 +382,7 @@ class AuthNone(AuthMethod):
     method_name = "auth_none"
 
     def __init__(self, authenticator):
-        self.authenticator = authenticator
+        AuthMethod.__init__(self, authenticator)
 
     def _append_message(self, m):
         return
@@ -386,7 +391,7 @@ class AuthPassword(AuthMethod):
     method_name = "password"
 
     def __init__(self, authenticator, password):
-        AuthMethod.__init__(authenticator)
+        AuthMethod.__init__(self, authenticator)
         if password is not None:
             self.password = password
             return
@@ -428,7 +433,7 @@ class AuthKeyboardInteractive(AuthMethod):
     method_name = "keyboard-interactive"
 
     def __init__(self, authenticator, *args):
-        AuthMethod.__init__(authenticator)
+        AuthMethod.__init__(self, authenticator)
         # args can be a sequence of (regex, string) pairs to be used
         # as a reply-bot, before (possibly) falling back to actually
         # doing an interactive prompt with keyboard input.
@@ -625,7 +630,7 @@ class AuthGSSAPI(AuthMethod):
     method_name = "gssapi-with-mic"
 
     def __init__(self, authenticator, *args):
-        AuthMethod.__init__(authenticator)
+        AuthMethod.__init__(self, authenticator)
         self.sshgss = GSSAuth(self.method_name, self.authenticator.ssh_config.get("gssapidelegatecredentials") == "yes")
         self.mech = None
 
@@ -650,7 +655,7 @@ class AuthGSSAPI(AuthMethod):
             self.authenticator._log(ERROR, "GSSAPI Error Token received: {}".format(error_token))
             # Server should follow with MSG_USERAUTH_FAILURE, so don't reply with a message here
             return None
-        if ptype == SSH_MSG_USERAUTH_GSSAPI_ERROR:
+        if ptype == MSG_USERAUTH_GSSAPI_ERROR:
             maj_status = m.get_int()
             min_status = m.get_int()
             err_msg = m.get_string()
@@ -662,7 +667,7 @@ class AuthGSSAPI(AuthMethod):
             self.mech = m.get_string()
             self.authenticator._log(DEBUG, "Server mechanism: {}".format(binascii.hexlify(self.mech)))
             token = self.sshgss.ssh_init_sec_context(
-                self.authenticator.transport.gss_host, # self.gss_host,
+                self.authenticator.transport.hostname, # self.gss_host,
                 self.mech,
                 self.authenticator.username)
             m = Message()
@@ -675,7 +680,7 @@ class AuthGSSAPI(AuthMethod):
             srv_token = m.get_string()
             self.authenticator._log(DEBUG, "Server reply with GSSAPI Token: {}".format(binascii.hexlify(srv_token)))
             next_token = self.sshgss.ssh_init_sec_context(
-                self.authenticator.transport.gss_host, # self.gss_host,
+                self.authenticator.transport.hostname, # self.gss_host,
                 self.mech,
                 self.authenticator.username,
                 srv_token)
@@ -704,7 +709,7 @@ class AuthGSSAPI_Keyex(AuthMethod):
     method_name = "gssapi-keyex"
 
     def __init__(self, authenticator, *args):
-        AuthMethod.__init__(authenticator)
+        AuthMethod.__init__(self, authenticator)
         if not authenticator.transport.gss_kex_used:
             raise AuthenticationException("gssapi-keyex cannot be used because initial key exchange was not done via GSS")
 
