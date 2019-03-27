@@ -212,17 +212,28 @@ class Authenticator(object):
         if self.username is None:
              self.username = self.ssh_config["user"]
         if explicit_methods:
+            # User supplied dict of method/iterators to use
+            preferred_authentications = list(explicit_methods)
             self.available_methods = explicit_methods
         else:
             # Assemble a MFA-capable dict of method names with iterators
             # for various AuthMethod objects to attempt, according to
             # what the server passes back in the MSG_USERAUTH_FAILURE content.
+            preferred_authentications = self.ssh_config["preferredauthentications"].split(",")
             self.available_methods = {}
-            if self.password_list:
+            if self.ssh_config["passwordauthentication"] == "yes":
                 self.available_methods["password"] = AuthPassword.factory(self, *self.password_list)
-            self.available_methods["publickey"] = AuthPublicKey.factory(self, *self.key_list)
-            self.available_methods["keyboard-interactive"] = AuthKeyboardInteractive.factory(self, ('Password(?i)', 'bongo'))
-            self.available_methods["gssapi-with-mic"] = AuthGSSAPI.factory(self)
+            if self.ssh_config["publickeyauthentication"] == "yes":
+                self.available_methods["publickey"] = AuthPublicKey.factory(self, *self.key_list)
+            if self.ssh_config["kbdinteractiveauthentication"] == "yes":
+                self.available_methods["keyboard-interactive"] = AuthKeyboardInteractive.factory(self, ('Password(?i)', 'bongo'))
+            if self.ssh_config["gssapiauthentiation"] = "yes":
+                self.available_methods["gssapi-with-mic"] = AuthGSSAPI.factory(self)
+                if self.ssh_config["gssapikeyex"] == "yes":
+                    # gssapi-keyex preferred priority
+                    preferred_authentications.insert(0, "gssapi-keyex")
+                    self.available_methods["gssapi-keyex"] = AuthGSSAPI_Keyex.factory(self)
+        # Use ssh_config IdentityAgent setting (replaces allow_agent)
         ssh_agent = self.ssh_config.get("identityagent", "SSH_AUTH_SOCK")
         if ssh_agent == "none" and "SSH_AUTH_SOCK" in os.environ:
             os.environ.pop("SSH_AUTH_SOCK")
@@ -288,6 +299,7 @@ class Authenticator(object):
                     else:
                         self._log(INFO, "Authentication {} failed".format(current_auth))
                     self._log(DEBUG, "Authentications that can continue: {}".format(",".join(self.server_accepts)))
+                    self._log(DEBUG, "Client preferred authentications: {}", preferred_authentications)
                 else:
                     # Anything other than general authentication messages should
                     # be handled by the specific AuthMethod object
@@ -300,7 +312,7 @@ class Authenticator(object):
                     except AuthenticationException as e:
                         self._log(DEBUG, "Unable to continue {}: {!r}".format(current_auth, e))
                 # Pick another (compatible) AuthMethod
-                for method in self.ssh_config["preferredauthentications"].split(","):
+                for method in preferred_authentications:
                     if (method in self.available_methods and
                         method in self.server_accepts):
                         try:
