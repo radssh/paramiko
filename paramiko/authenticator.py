@@ -139,6 +139,8 @@ class Authenticator(object):
         else:
             self.key_list = []
         self.passphrase = passphrase
+        self.interactive_replybots = []
+        self.interactive_handlers = []
         # State of authentication
         self.server_reply = Queue.Queue()
         self.authenticated = False
@@ -200,6 +202,15 @@ class Authenticator(object):
             self.server_reply.put((MSG_USERAUTH_FAILURE, m))
             self.in_progress = False
 
+    def add_replybot(self, *replies):
+        # Pre-canned responses for automated keyboard-interactive processing
+        # Alternative to setting up a callback handler, uses a list of
+        # (regex, answer) pairs.
+        self.interactive_replybots.append(replies)
+
+    def add_handler(self, handler):
+        self.interactive_handlers.append(handler)
+
     def authenticate(self, force_service_request=False, explicit_methods=None):
         # TODO: define AuthSource (maybe rename...lol), should be lightweight,
         # pairing an auth type with some value or iterable of values
@@ -228,7 +239,11 @@ class Authenticator(object):
             if self.ssh_config["pubkeyauthentication"] == "yes":
                 self.available_methods["publickey"] = AuthPublicKey.factory(self, *self.key_list)
             if self.ssh_config["kbdinteractiveauthentication"] == "yes":
-                self.available_methods["keyboard-interactive"] = AuthKeyboardInteractive.factory(self, ('Password(?i)', 'bongo'))
+                if not self.interactive_handlers and not self.reply_bots:
+                    # Fallback option to supply password during keyboard-interactive
+                    if len(self.password_list) == 1:
+                        self.add_replybot(('.', password_list[0]))
+                self.available_methods["keyboard-interactive"] = AuthKeyboardInteractive.factory(self, handlers=self.interactive_handlers, reply_bots=self.interactive_replybots)
             if self.ssh_config["gssapiauthentication"] == "yes":
                 self.available_methods["gssapi-with-mic"] = AuthGSSAPI.factory(self)
                 if self.ssh_config["gssapikeyex"] == "yes":
@@ -446,12 +461,12 @@ class AuthPassword(AuthMethod):
 class AuthKeyboardInteractive(AuthMethod):
     method_name = "keyboard-interactive"
 
-    def __init__(self, authenticator, *args):
+    def __init__(self, authenticator, handler=None, auto_replies=None):
         AuthMethod.__init__(self, authenticator)
-        # args can be a sequence of (regex, string) pairs to be used
-        # as a reply-bot, before (possibly) falling back to actually
-        # doing an interactive prompt with keyboard input.
-        self.auto_replies = args
+        # Support old-style handler (callable), or a list/tuple
+        # of auto_reply pairs (regex, reply_text)
+        self.auto_replies = auto_replies or []
+        self.handler = handler
 
     def _append_message(self, m):
         m.add_string("") # Language tag (deprecated)
@@ -471,35 +486,44 @@ class AuthKeyboardInteractive(AuthMethod):
             name, instruction, n_prompts
         ))
         prompt_list = []
+        for p in range(n_prompts):
+            prompt_list.append((m.get_text(), m.get_boolean()))
+
         reply = Message()
         reply.add_byte(cMSG_USERAUTH_INFO_RESPONSE)
         reply.add_int(n_prompts)
-
-        for n in range(n_prompts):
-            prompt_text = m.get_text()
-            prompt_echo = m.get_boolean()
-            for regex, answer in self.auto_replies:
-                if re.search(regex, prompt_text):
-                    reply.add_string(answer)
-                    if prompt_echo:
-                        self.authenticator._log(DEBUG, "Auto-fill {} ({})".format(prompt_text, answer))
-                    else:
-                        self.authenticator._log(DEBUG, "Auto-fill {} ({})".format(prompt_text, "*" * len(answer)))
-                    break
-            else:
-                if self.authenticator.ssh_config["batchmode"] == "no":
-                    reply.add_string(getpass.getpass(prompt_text))
+        if self.handler:
+            # Pass the whole prompt data to the supplied handler callable
+            self.authenticator._log(DEBUG, "Calling supplied prompt handler")
+            for answer in self.handler(name, instructions, prompt_list):
+                reply.add_string(answer)
+        else:
+            for prompt_text, prompt_echo in prompt_list:
+                for regex, answer in self.auto_replies:
+                    if re.search(regex, prompt_text):
+                        if prompt_echo:
+                            self.authenticator._log(DEBUG, "Auto-fill {} ({})".format(prompt_text, answer))
+                        else:
+                            self.authenticator._log(DEBUG, "Auto-fill {} ({})".format(prompt_text, "*" * len(answer)))
+                        reply.add_string(answer)
+                        break
                 else:
-                    self.authenticator._log(DEBUG, "No auto-reply available for prompt ({}) - auto-fill with empty string".format(prompt_text))
-                    reply.add_string("")
+                    if self.authenticator.ssh_config["batchmode"] == "no":
+                        reply.add_string(getpass.getpass(prompt_text))
+                    else:
+                        self.authenticator._log(DEBUG, "No auto-reply available for prompt ({}) - auto-fill with empty string".format(prompt_text))
+                        reply.add_string("")
         return reply
 
     @classmethod
-    def factory(cls, authenticator, *args):
-        if args:
-            # Setup as auto-reply bot
-            yield cls(authenticator, *args)
-        # After trying listed passwords, can include interactive
+    def factory(cls, authenticator, handlers=None, reply_bots=None):
+        if handlers:
+            for h in handlers:
+                yield cls(authenticator, handler=h)
+        if reply_bots:
+            for bot in reply_bots:
+                yield cls(authenticator, auto_replies=bot)
+        # After trying supplied handlers/responders, can include interactive
         # password prompts (3)
         if authenticator.ssh_config["batchmode"] == "no":
             for x in range(int(authenticator.ssh_config["numberofpasswordprompts"])):
