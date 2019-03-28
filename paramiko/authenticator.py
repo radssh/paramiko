@@ -207,6 +207,8 @@ class Authenticator(object):
         # handles multi-factor auth much better than the current shite
         # trickledown. (Be very TDD here...! Perhaps wait until single-source
         # tests all pass first, then can ensure they continue to do so?)
+        if not self.transport.active or not self.transport.initial_kex_done:
+            raise AuthenticationException("No existing session")
 
         # Set the username from ssh_config, if not already set at __init__()
         if self.username is None:
