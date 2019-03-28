@@ -246,7 +246,7 @@ class Authenticator(object):
                 self.available_methods["keyboard-interactive"] = AuthKeyboardInteractive.factory(self, handlers=self.interactive_handlers, reply_bots=self.interactive_replybots)
             if self.ssh_config["gssapiauthentication"] == "yes":
                 self.available_methods["gssapi-with-mic"] = AuthGSSAPI.factory(self)
-                if self.ssh_config["gssapikeyex"] == "yes":
+                if self.ssh_config["gssapi-keyex"] == "yes":
                     # gssapi-keyex preferred priority
                     preferred_authentications.insert(0, "gssapi-keyex")
                     self.available_methods["gssapi-keyex"] = AuthGSSAPI_Keyex.factory(self)
