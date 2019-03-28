@@ -223,11 +223,11 @@ class Authenticator(object):
             self.available_methods = {}
             if self.ssh_config["passwordauthentication"] == "yes":
                 self.available_methods["password"] = AuthPassword.factory(self, *self.password_list)
-            if self.ssh_config["publickeyauthentication"] == "yes":
+            if self.ssh_config["pubkeyauthentication"] == "yes":
                 self.available_methods["publickey"] = AuthPublicKey.factory(self, *self.key_list)
             if self.ssh_config["kbdinteractiveauthentication"] == "yes":
                 self.available_methods["keyboard-interactive"] = AuthKeyboardInteractive.factory(self, ('Password(?i)', 'bongo'))
-            if self.ssh_config["gssapiauthentiation"] = "yes":
+            if self.ssh_config["gssapiauthentication"] == "yes":
                 self.available_methods["gssapi-with-mic"] = AuthGSSAPI.factory(self)
                 if self.ssh_config["gssapikeyex"] == "yes":
                     # gssapi-keyex preferred priority
@@ -299,7 +299,7 @@ class Authenticator(object):
                     else:
                         self._log(INFO, "Authentication {} failed".format(current_auth))
                     self._log(DEBUG, "Authentications that can continue: {}".format(",".join(self.server_accepts)))
-                    self._log(DEBUG, "Client preferred authentications: {}", preferred_authentications)
+                    self._log(DEBUG, "Client preferred authentications: {}".format(preferred_authentications))
                 else:
                     # Anything other than general authentication messages should
                     # be handled by the specific AuthMethod object
@@ -561,14 +561,31 @@ class AuthPublicKey(AuthMethod):
         attempted = []
         keys = list(args)
         # Add Agent keys and Identities if requested
+        if authenticator.ssh_config.get("identityfile"):
+            identity_files = authenticator.ssh_config.get("identityfile")
+        else:
+            # Prepare the list of default identity files
+            identity_files = []
+            for sshdir in (os.path.expanduser("~/.ssh"), os.path.expanduser("~/ssh")):
+                if os.path.isdir(os.path.expanduser(sshdir)):
+                    for keytype in ("rsa", "ed25519", "ecdsa", "dss"):
+                        keyfile = os.path.join(sshdir, "id_{}".format(keytype))
+                        certfile = os.path.join(sshdir, "id_{}-cert.pub".format(keytype))
+                        if os.path.exists(keyfile):
+                            identity_files.append(keyfile)
+                        if os.path.exists(certfile):
+                            identity_files.append(certfile)
+        # IdentitiesOnly controls the usage of ssh-agent to find additional keys
         if authenticator.ssh_config["identitiesonly"] == "no":
             agent = Agent()
             keys.extend(agent.get_keys())
-            for keytype in ("rsa", "rsa", "ed25519", "ecdsa", "dss", "rsa"):
-                keys.append("~/.ssh/id_{}-cert.pub".format(keytype))
-                keys.append("~/ssh/id_{}-cert.pub".format(keytype))
-                keys.append("~/.ssh/id_{}".format(keytype))
-                keys.append("~/ssh/id_{}".format(keytype))
+        # Mimic the old look_for_keys by interpreting IdentitiesOnly based
+        # on whether there was an explicit list of keys passed in, which
+        # overrides IdentityFile configuration settings.
+        if authenticator.ssh_config.get("identitiesonly") == "no" or not args:
+            authenticator._log(DEBUG, "Adding identity files: {}".format(identity_files))
+            keys.extend(identity_files)
+        authenticator._log(DEBUG, "Available PKeys: {}".format(keys))
 
         for key in keys:
             if not isinstance(key, PKey):
