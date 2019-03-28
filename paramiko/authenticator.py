@@ -211,7 +211,7 @@ class Authenticator(object):
     def add_handler(self, handler):
         self.interactive_handlers.append(handler)
 
-    def authenticate(self, force_service_request=False, explicit_methods=None):
+    def authenticate(self, explicit_methods=None, force_service_request=False):
         # TODO: define AuthSource (maybe rename...lol), should be lightweight,
         # pairing an auth type with some value or iterable of values
         # TODO: implement cleaner version of SSHClient._auth, somehow, that
