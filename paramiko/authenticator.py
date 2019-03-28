@@ -239,7 +239,7 @@ class Authenticator(object):
             if self.ssh_config["pubkeyauthentication"] == "yes":
                 self.available_methods["publickey"] = AuthPublicKey.factory(self, *self.key_list)
             if self.ssh_config["kbdinteractiveauthentication"] == "yes":
-                if not self.interactive_handlers and not self.reply_bots:
+                if not self.interactive_handlers and not self.interactive_replybots:
                     # Fallback option to supply password during keyboard-interactive
                     if len(self.password_list) == 1:
                         self.add_replybot(('.', password_list[0]))
