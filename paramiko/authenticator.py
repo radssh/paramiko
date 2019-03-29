@@ -20,6 +20,7 @@ import re
 import sys
 import traceback
 import binascii
+import logging
 
 try:
     import Queue
@@ -128,7 +129,7 @@ class Authenticator(object):
         # the caller didn't already do these things) like the call to
         # .start_client; then update lifecycle in docstring.
         self.transport = transport
-        self._log = transport._log
+        self._log = logging.getLogger("paramiko.authenticator").log
         self.username = username
         if default_password is not None:
             self.password_list = [default_password]
@@ -147,6 +148,7 @@ class Authenticator(object):
         self.authenticated = False
         self.in_progress = False
         self.server_accepts = [] # Pending initial auth_none
+        self.banner = None
         # Temporary, for backward compatibility with legacy AuthHandler
         def makeshift_handler(ptype):
             def fn(self, m):
@@ -167,6 +169,8 @@ class Authenticator(object):
         Other values will be substituted in whole
         """
         for k, v in d.items():
+            # Normalize keys to lowercase
+            k = k.lower()
             if k not in self.ssh_config:
                 continue
             if isinstance(v, list):
@@ -306,7 +310,7 @@ class Authenticator(object):
                     banner = m.get_text()
                     language = m.get_text()
                     self._log(DEBUG, "Banner received: {} ({})".format(banner.strip(), language))
-                    self.transport.banner = banner
+                    self.banner = banner
                     continue
                 elif ptype == MSG_USERAUTH_FAILURE:
                     self.server_accepts = m.get_text().split(',')
