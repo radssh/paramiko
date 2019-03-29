@@ -21,6 +21,7 @@ import sys
 import traceback
 import binascii
 import logging
+import itertools
 
 try:
     import Queue
@@ -61,9 +62,27 @@ class Authenticator(object):
 
     Lifecycle is relatively straightforward:
 
-    - Instantiate with a handle onto a `Transport` object. This object must
-      already have been prepared for authentication by calling
-      `Transport.start_client`.
+    - Instantiate with optional collection of core parameters. Many of the
+      previous options have been moved from core options into a generic
+      ssh_config style of option tracking that can be customized with one
+      (or more) subsequent calls to `update_authentication_options()`.
+      The core options are:
+        - username (can be updated with ssh_config `User`)
+        - default_password (for password authentication)
+        - key_or_keyfile (`PKey` or filename)
+        - passphrase (distinct from default_password, for decrypting keyfile)
+
+    - If desired, tweak the default ssh_config options setup in the
+      Authenticator, using `update_authentication_options()`. In most cases,
+      this will not be strictly necessary, unless the OpenSSH client would
+      need additional options specified (typically in ~/.ssh/config or with
+      command line switches "-o keyword=value"). These options will use
+      the OpenSSH setting names and values, and may be specified via a dict
+      (returned from SSHConfig.lookup), or by keyword arguments:
+      `update_authentication_options(BatchMode="no",
+                                     NumberOfPasswordPrompts="1")`
+      Note: Only option names pertaining to user authentication are in scope
+
     - Call the instance's `authenticate` method, which will make use of
       one or more available authentication methods managed by the Authenticator
       object itself. The authenticate() call will:
@@ -78,9 +97,10 @@ class Authenticator(object):
           offered. `AuthenticationException` should be raised only if there
           was a more unusual event occurring during processing.
         - either way, the point is that the caller will have authenticated
-          successfully, have an unauthenticated `Transport` to continue
+          successfully, or have an unauthenticated `Transport` to continue
           authentication attempts via other method(s).
         - see API docs for `authenticate` for further details.
+
     - Alternately, for tighter control of which auth sources are tried and in
       what order, call `auth_$method` components directly, following the model
       of the legacy `AuthHandler`, for true backward compatibility.
@@ -92,7 +112,8 @@ class Authenticator(object):
     # or from a manually constructed dict.
     # Differences from OpenSSH defaults:
     # - BatchMode defaults to 'yes' instead of 'no'
-    ssh_config = {
+    # - User and Hostname are initially left unset
+    default_ssh_config = {
         "gssapiauthentication": "no",
         "hostbasedauthentication": "no",
         "pubkeyauthentication": "yes",
@@ -100,10 +121,11 @@ class Authenticator(object):
         "passwordauthentication": "yes",
         "challengeresponseauthentication": "yes",
         "preferredauthentications": "gssapi-with-mic,hostbased,publickey,keyboard-interactive,password",
-        "user": getpass.getuser(),
+        "user": None, # Filled in later
+        "hostname": None # Needed for GSSAPI
         "batchmode": "yes",
         "identityfile": [],
-        "certificatefile": [],
+        # "certificatefile": [],
         "enablesshkeysign": "no",
         "fingerprinthash": "sha256",
         "gssapidelegatecredentials": "no",
@@ -118,19 +140,17 @@ class Authenticator(object):
     }
 
     def __init__(self,
-            transport,
             username=None,
             default_password=None,
             keyfile_or_key=None,
             passphrase=None):
-        # TODO: probably sanity check transport state and bail early if it's
-        # not ready.
         # TODO: consider adding some more of SSHClient.connect (optionally, if
         # the caller didn't already do these things) like the call to
         # .start_client; then update lifecycle in docstring.
-        self.transport = transport
+        self.ssh_config = dict(self.default_ssh_config)
         self._log = logging.getLogger("paramiko.authenticator").log
-        self.username = username
+        if username:
+            self.ssh_config["user"] = username
         if default_password is not None:
             self.password_list = [default_password]
         else:
@@ -160,7 +180,7 @@ class Authenticator(object):
         self._handler_table[MSG_SERVICE_ACCEPT] = makeshift_handler(MSG_SERVICE_ACCEPT)
 
 
-    def update_authentication_options(self, d):
+    def update_authentication_options(self, config_dict=None, **kwargs):
         """
         SSHConfig.lookup() or manually constructed dict
         Lists will be extended with updated values
@@ -168,7 +188,7 @@ class Authenticator(object):
         comma-separated string
         Other values will be substituted in whole
         """
-        for k, v in d.items():
+        for k, v in itertools.chain(d.items(), kwargs):
             # Normalize keys to lowercase
             k = k.lower()
             if k not in self.ssh_config:
@@ -216,21 +236,21 @@ class Authenticator(object):
     def add_handler(self, handler):
         self.interactive_handlers.append(handler)
 
-    def authenticate(self, explicit_methods=None, force_service_request=False):
+    def authenticate(self, transport, explicit_methods=None, force_service_request=False):
         # TODO: define AuthSource (maybe rename...lol), should be lightweight,
         # pairing an auth type with some value or iterable of values
         # TODO: implement cleaner version of SSHClient._auth, somehow, that
         # handles multi-factor auth much better than the current shite
         # trickledown. (Be very TDD here...! Perhaps wait until single-source
         # tests all pass first, then can ensure they continue to do so?)
-        if not self.transport.active or not self.transport.initial_kex_done:
+        if not transport.active or not transport.initial_kex_done:
             raise AuthenticationException("No existing session")
-        if self.authenticated:
+        if transport.is_authenticated():
             raise AuthenticationException("Transport already authenticated")
 
         # Set the username from ssh_config, if not already set at __init__()
-        if self.username is None:
-             self.username = self.ssh_config["user"]
+        if ssh_config["user"] is None:
+             self.ssh_config["user"] = getpass.getuser()
         if explicit_methods:
             # User supplied dict of method/iterators to use
             preferred_authentications = list(explicit_methods)
@@ -304,7 +324,7 @@ class Authenticator(object):
                     self._log(INFO, "Authentication success!")
                     self.authenticated = True
                     self.in_progress = False
-                    self.transport._auth_trigger()
+                    self.transport._auth_trigger(self.ssh_config["user"])
                     break
                 elif ptype == MSG_USERAUTH_BANNER:
                     banner = m.get_text()
@@ -377,7 +397,7 @@ class AuthMethod(object):
         # initial request starting a new authentication method attempt.
         m = Message()
         m.add_byte(cMSG_USERAUTH_REQUEST)
-        m.add_string(self.authenticator.username)
+        m.add_string(self.authenticator.ssh_config["user"])
         m.add_string('ssh-connection')
         m.add_string(self.method_name)
         self._append_message(m)
@@ -440,6 +460,7 @@ class AuthPassword(AuthMethod):
         # RFC4252 documents SSH_MSG_USERAUTH_PASSWD_CHANGEREQ as a possibiilty
         # although OpenSSH seems to only perform this during keyboard-interactive
         # but use this as a stub just in case...
+        # https://marc.info/?l=openssh-unix-dev&m=153831284026324&w=2
         if ptype != MSG_USERAUTH_PASSWD_CHANGEREQ:
             raise AuthenticationException("Unexpected continuation message for {}: {:d}".format(self.method_name, ptype))
         raise AuthenticationException("Server requires password to be changed")
