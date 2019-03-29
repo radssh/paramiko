@@ -106,6 +106,7 @@ class Authenticator(object):
         "enablesshkeysign": "no",
         "fingerprinthash": "sha256",
         "gssapidelegatecredentials": "no",
+        "gssapi-keyex": "yes",
         # "hostbasedkeytypes": "",
         "identitiesonly": "no",
         "identityagent": "SSH_AUTH_SOCK",
@@ -145,7 +146,7 @@ class Authenticator(object):
         self.server_reply = Queue.Queue()
         self.authenticated = False
         self.in_progress = False
-        self.server_accepts = ['none'] # Pending initial auth_none
+        self.server_accepts = [] # Pending initial auth_none
         # Temporary, for backward compatibility with legacy AuthHandler
         def makeshift_handler(ptype):
             def fn(self, m):
@@ -220,6 +221,8 @@ class Authenticator(object):
         # tests all pass first, then can ensure they continue to do so?)
         if not self.transport.active or not self.transport.initial_kex_done:
             raise AuthenticationException("No existing session")
+        if self.authenticated:
+            raise AuthenticationException("Transport already authenticated")
 
         # Set the username from ssh_config, if not already set at __init__()
         if self.username is None:
@@ -242,7 +245,7 @@ class Authenticator(object):
                 if not self.interactive_handlers and not self.interactive_replybots:
                     # Fallback option to supply password during keyboard-interactive
                     if len(self.password_list) == 1:
-                        self.add_replybot(('.', password_list[0]))
+                        self.add_replybot(('.', self.password_list[0]))
                 self.available_methods["keyboard-interactive"] = AuthKeyboardInteractive.factory(self, handlers=self.interactive_handlers, reply_bots=self.interactive_replybots)
             if self.ssh_config["gssapiauthentication"] == "yes":
                 self.available_methods["gssapi-with-mic"] = AuthGSSAPI.factory(self)
@@ -257,7 +260,7 @@ class Authenticator(object):
             self._log(DEBUG, "Disabling ssh-agent key lookups (IdentityAgent none)")
         elif ssh_agent != "SSH_AUTH_SOCK":
             os.environ["SSH_AUTH_SOCK"] = ssh_agent
-            self._log(DEBUG, "Redirecting ssh-agent key lookups (IdentityAgent {})".format(ssh-agent))
+            self._log(DEBUG, "Redirecting ssh-agent key lookups (IdentityAgent {})".format(ssh_agent))
 
 
         self.transport.lock.acquire()
@@ -280,14 +283,11 @@ class Authenticator(object):
                     raise AuthenticationException("Unexpected service name: expected {}, got {}".format(self.service_name, service_name))
                 self._log(DEBUG, "Server accepted {} request".format(self.service_name))
                 self.in_progress = True
-            if self.server_accepts and self.server_accepts[0] == 'none':
-                current_auth = AuthNone(self)
-                self.transport._send_message(current_auth.message())
-                self._log(DEBUG, "Sent auth-none")
-            else:
-                self._log(DEBUG, "Resuming {} processing".format(self.service_name))
-                current_auth = "placebo"
-                raise NotImplemented
+
+            # Issue an auth_none before the loop, regardless of if this is
+            # intial call, or a followup to authenticate
+            current_auth = AuthNone(self)
+            self.transport._send_message(current_auth.message())
 
             while self.in_progress:
                 try:
