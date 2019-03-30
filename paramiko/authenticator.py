@@ -161,8 +161,7 @@ class Authenticator(object):
             username=None,
             default_password=None,
             keyfile_or_key=None,
-            passphrase=None
-            insecure_logging=True # Remove before release!!!
+            passphrase=None,
             ):
         # TODO: consider adding some more of SSHClient.connect (optionally, if
         # the caller didn't already do these things) like the call to
@@ -201,9 +200,6 @@ class Authenticator(object):
         for ptype in range(MSG_USERAUTH_REQUEST, 79): # HIGHEST_USERAUTH_MESSAGE_ID
             self._handler_table[ptype] = makeshift_handler(ptype)
         self._handler_table[MSG_SERVICE_ACCEPT] = makeshift_handler(MSG_SERVICE_ACCEPT)
-        self.insecure_logging = insecure_logging
-        if self.insecure_logging:
-            self._log(ERROR, "*** Authenticator in Insecure Log mode - only for DEBUGGING ***")
 
     def update_authentication_options(self, config_dict=None, **kwargs):
         """
@@ -399,10 +395,11 @@ class Authenticator(object):
                     # raise AuthenticationException("Client has run out of authentication methods")
                     return False
         except Exception as e:
+            # Catch-all, but relabel this as AuthenticationException
+            # preserving the traceback
             self._log(ERROR, "Exception in authenticate(): {!r}".format(e))
             exc_type, exc_value, exc_traceback = sys.exc_info()
-            self._log(DEBUG, traceback.format_exc())
-            raise
+            raise AuthenticationException, AuthenticationException(repr(e)), exc_traceback
         finally:
             self.transport.lock.release()
         return self.authenticated
@@ -509,14 +506,10 @@ class AuthPassword(AuthMethod):
                 yield cls(authenticator, None)
 
     def __str__(self):
-        # Obfuscate the password for simpler early debugging
-        # Long term, probably don't want to even divulge the hashed password
-        if self.authenticator.insecure_logging:
-            hash = hashlib.sha1(self.password.encode())
-            # return "Password:SHA1({})".format(self.password)
-            return "Password:SHA1({})".format(hash.hexdigest())
-        else:
-            return "Password(hidden)"
+        # Having the hash value handy for debug, but potentailly bad security
+        # hash = hashlib.sha1(self.password.encode())
+        # return "Password:SHA1({})".format(self.password)
+        return "Password"
 
 class AuthKeyboardInteractive(AuthMethod):
     method_name = "keyboard-interactive"
@@ -788,14 +781,14 @@ class AuthGSSAPI(AuthMethod):
             m = Message()
             m.add_byte(cMSG_USERAUTH_GSSAPI_TOKEN)
             m.add_string(token)
-            if self.authenticator.insecure_logging:
-                self.authenticator._log(DEBUG, "GSSAPI Token generated from ssh_init_sec_context(): {}".format(binascii.hexlify(token)))
+            # Is GSS Token value possibly sensitive information?
+            # self.authenticator._log(DEBUG, "GSSAPI Token generated from ssh_init_sec_context(): {}".format(binascii.hexlify(token)))
             return m
         if ptype == MSG_USERAUTH_GSSAPI_TOKEN:
             # Reprocess context with supplied token from server
             srv_token = m.get_string()
-            if self.authenticator.insecure_logging:
-                self.authenticator._log(DEBUG, "Server reply with GSSAPI Token: {}".format(binascii.hexlify(srv_token)))
+            # Is GSS Token value possibly sensitive information?
+            # self.authenticator._log(DEBUG, "Server reply with GSSAPI Token: {}".format(binascii.hexlify(srv_token)))
             next_token = self.sshgss.ssh_init_sec_context(
                 self.authenticator.ssh_config["hostname"], # self.gss_host,
                 self.mech,
@@ -805,15 +798,15 @@ class AuthGSSAPI(AuthMethod):
                 m = Message()
                 m.add_byte(cMSG_USERAUTH_GSSAPI_TOKEN)
                 m.add_string(next_token)
-                if self.authenticator.insecure_logging:
-                    self.authenticator._log(DEBUG, "Client answer with GSSAPI Token: {}".format(binascii.hexlify(next_token)))
+                # Is GSS Token value possibly sensitive information?
+                # self.authenticator._log(DEBUG, "Client answer with GSSAPI Token: {}".format(binascii.hexlify(next_token)))
                 return m
             m = Message()
             m.add_byte(cMSG_USERAUTH_GSSAPI_MIC)
             mic = self.sshgss.ssh_get_mic(self.authenticator.transport.session_id)
             m.add_string(mic)
-            if self.authenticator.insecure_logging:
-                self.authenticator._log(DEBUG, "Client finishing with GSSAPI MIC: {}".format(binascii.hexlify(mic)))
+            # Is GSS MIC value possibly sensitive information?
+            # self.authenticator._log(DEBUG, "Client finishing with GSSAPI MIC: {}".format(binascii.hexlify(mic)))
             return m
         raise AuthenticationException("Unexpected message type for {}: {:d}".format(self.method_name, ptype))
 
