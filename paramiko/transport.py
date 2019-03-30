@@ -1274,7 +1274,7 @@ class Transport(threading.Thread, ClosingContextManager):
 
         :return: username that was authenticated (a `str`), or ``None``.
         """
-        if not self.active or(self.auth_handler is None):
+        if not self.active or (self.auth_handler is None):
             return None
         return self.auth_handler.get_username()
 

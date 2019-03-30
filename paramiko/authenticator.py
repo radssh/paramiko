@@ -171,6 +171,7 @@ class Authenticator(object):
         self.authenticated = False
         self.in_progress = False
         self.server_accepts = [] # Pending initial auth_none
+        self.authenticated_sequence = []
         self.banner = None
         # Temporary, for backward compatibility with legacy AuthHandler
         def makeshift_handler(ptype):
@@ -248,7 +249,7 @@ class Authenticator(object):
         # tests all pass first, then can ensure they continue to do so?)
         if not self.transport.active or not self.transport.initial_kex_done:
             raise AuthenticationException("No existing session")
-        if self.transport.is_authenticated():
+        if self.authenticated:
             raise AuthenticationException("Transport already authenticated")
 
         # Set the username from ssh_config, if not already set at __init__()
@@ -328,6 +329,7 @@ class Authenticator(object):
                     self._log(INFO, "Authentication success!")
                     self.authenticated = True
                     self.in_progress = False
+                    self.authenticated_sequence.append(current_auth)
                     self.transport._auth_trigger()
                     break
                 elif ptype == MSG_USERAUTH_BANNER:
@@ -341,6 +343,7 @@ class Authenticator(object):
                     partial_success = m.get_boolean()
                     if partial_success:
                         self._log(INFO, "Authentication {} partial success".format(current_auth))
+                        self.authenticated_sequence.append(current_auth)
                     else:
                         self._log(INFO, "Authentication {} failed".format(current_auth))
                     self._log(DEBUG, "Authentications that can continue: {}".format(",".join(self.server_accepts)))
