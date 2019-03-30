@@ -201,7 +201,7 @@ class Authenticator(object):
             self._handler_table[ptype] = makeshift_handler(ptype)
         self._handler_table[MSG_SERVICE_ACCEPT] = makeshift_handler(MSG_SERVICE_ACCEPT)
 
-    def update_authentication_options(self, config_dict=None, **kwargs):
+    def update_authentication_options(self, config_dict={}, **kwargs):
         """
         SSHConfig.lookup() or manually constructed dict
         Lists will be extended with updated values
@@ -209,7 +209,7 @@ class Authenticator(object):
         comma-separated string
         Other values will be substituted in whole
         """
-        for k, v in itertools.chain(config_dict.items(), kwargs):
+        for k, v in itertools.chain(config_dict.items(), kwargs.items()):
             # Normalize keys to lowercase
             k = k.lower()
             if k not in self.ssh_config:
@@ -276,7 +276,7 @@ class Authenticator(object):
         # or updated via `update_authentication_options()`
         if self.ssh_config["user"] is None:
              self.ssh_config["user"] = getpass.getuser()
-        if explicit_methods:
+        if explicit_methods is not None:
             # User supplied dict of method/iterators to use
             preferred_authentications = list(explicit_methods)
             self.available_methods = explicit_methods
@@ -403,6 +403,86 @@ class Authenticator(object):
         finally:
             self.transport.lock.release()
         return self.authenticated
+
+    # Legacy interface calls - for backward compatibility only
+    def auth_none(self, username, event):
+        self._log(INFO, "Deprecated Transport.auth_none() called - switch to Authenticator")
+        if username != self.ssh_config["user"]:
+            raise AuthenticationException("Change of user not permitted")
+        self.authenticate({})
+        if event:
+            event.set()
+
+    def auth_gssapi_keyex(self, username, event):
+        self._log(INFO, "Deprecated Transport.auth_gssapi_keyex() called - switch to Authenticator")
+        if username != self.ssh_config["user"]:
+            raise AuthenticationException("Change of user not permitted")
+        self.authenticate({"gssapi-keyex": AuthGSSAPI_Keyex.factory(self)})
+        if event:
+            event.set()
+
+    def auth_gssapi_with_mic(self, username, gss_host, gss_deleg_creds, event):
+        self._log(INFO, "Deprecated Transport.auth_gssapi_with_mic() called - switch to Authenticator")
+        if username != self.ssh_config["user"]:
+            raise AuthenticationException("Change of user not permitted")
+        self.update_authentication_options(
+            Hostname=gss_host,
+            GSSAPIDelegateCredentials="yes" if gss_deleg_creds else "no"
+        )
+        self.authenticate({"gssapi-with-mic": AuthGSSAPI.factory(self)})
+        if event:
+            event.set()
+
+    def auth_password(self, username, password, event):
+        self._log(INFO, "Deprecated Transport.auth_password() called - switch to Authenticator")
+        if username != self.ssh_config["user"]:
+            raise AuthenticationException("Change of user not permitted")
+        self.authenticate({"password": AuthPassword.factory(self, password)})
+        if event:
+            event.set()
+
+
+    def auth_interactive(self, username, handler, event, submethods=''):
+        self._log(INFO, "Deprecated Transport.auth_interactive() called - switch to Authenticator")
+        if username != self.ssh_config["user"]:
+            raise AuthenticationException("Change of user not permitted")
+        if submethods:
+            self.update_authentication_options(KbdInteractiveDevices=submethods)
+        if handler:
+            self.authenticate({"gssapi-keyex": AuthKeyboardInteractive.factory(self, handlers=[handler])})
+        else:
+            self.authenticate({"gssapi-keyex": AuthKeyboardInteractive.factory(self)})
+        if event:
+            event.set()
+
+
+    def auth_publickey(self, username, key, event):
+        self._log(INFO, "Deprecated Transport.auth_publickey() called - switch to Authenticator")
+        if username != self.ssh_config["user"]:
+            raise AuthenticationException("Change of user not permitted")
+        # Safe change of SSH options IdentityFile & IdentitiesOnly
+        save_config = self.ssh_config
+        # ensure dict keys in lowercase, since it's being built manually
+        self.ssh_config = dict(
+            user = save_config.get('user', getpass.getuser()),
+            identitiesonly = "yes",
+            identityfile = [key]
+        )
+        self.authenticate({"publickey": AuthPublicKey.factory(self)})
+        self.ssh_config = save_config
+        if event:
+            event.set()
+
+    def wait_for_response(self, event):
+        # No longer support asynchronous authentication, and we can
+        # better rely on AuthenticationException being thrown without
+        # bending over backward to save it. So the return options
+        # become the list of allowed authentication types (if not authenticated)
+        # or an empty list if authentication was successful.
+        self._log(INFO, "Deprecated AuthHandler.wait_for_response() called - switch to Authenticator")
+        if not self.is_authenticated():
+            return self.server_accepts
+        return []
 
 
 class AuthMethod(object):
@@ -608,7 +688,7 @@ class AuthPublicKey(AuthMethod):
             m.add_string(self.pkey.asbytes())
         if self.sign_data:
             blob = self._get_session_blob(
-                self.pkey, 'ssh-connection', self.authenticator.username)
+                self.pkey, 'ssh-connection', self.authenticator.ssh_config["user"])
             sig = self.pkey.sign_ssh_data(blob)
             m.add_string(sig)
 
@@ -827,7 +907,7 @@ class AuthGSSAPI_Keyex(AuthMethod):
 
     def _append_message(self, m):
         kexgss = self.authenticator.transport.kexgss_ctxt
-        kexgss.set_username(self.username)
+        kexgss.set_username(self.authenticator.ssh_config["user"])
         mic_token = kexgss.ssh_get_mic(self.authenticator.transport.session_id)
         m.add_string(mic_token)
 
