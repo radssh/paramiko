@@ -62,10 +62,11 @@ class Authenticator(object):
 
     Lifecycle is relatively straightforward:
 
-    - Instantiate with optional collection of core parameters. Many of the
-      previous options have been moved from core options into a generic
-      ssh_config style of option tracking that can be customized with one
-      (or more) subsequent calls to `update_authentication_options()`.
+    - Instantiate with a `Transport` handle, along with an optional collection
+      of core parameters. Many of the previous options have been moved from
+      core options into a generic ssh_config style of option tracking that
+      can be customized with one (or more) subsequent calls to
+      `update_authentication_options()`.
       The core options are:
         - username (can be updated with ssh_config `User`)
         - default_password (for password authentication)
@@ -140,6 +141,7 @@ class Authenticator(object):
     }
 
     def __init__(self,
+            transport,
             username=None,
             default_password=None,
             keyfile_or_key=None,
@@ -147,6 +149,7 @@ class Authenticator(object):
         # TODO: consider adding some more of SSHClient.connect (optionally, if
         # the caller didn't already do these things) like the call to
         # .start_client; then update lifecycle in docstring.
+        self.transport = transport
         self.ssh_config = dict(self.default_ssh_config)
         self._log = logging.getLogger("paramiko.authenticator").log
         if username:
@@ -236,19 +239,20 @@ class Authenticator(object):
     def add_handler(self, handler):
         self.interactive_handlers.append(handler)
 
-    def authenticate(self, transport, explicit_methods=None, force_service_request=False):
+    def authenticate(self, explicit_methods=None, force_service_request=False):
         # TODO: define AuthSource (maybe rename...lol), should be lightweight,
         # pairing an auth type with some value or iterable of values
         # TODO: implement cleaner version of SSHClient._auth, somehow, that
         # handles multi-factor auth much better than the current shite
         # trickledown. (Be very TDD here...! Perhaps wait until single-source
         # tests all pass first, then can ensure they continue to do so?)
-        if not transport.active or not transport.initial_kex_done:
+        if not self.transport.active or not self.transport.initial_kex_done:
             raise AuthenticationException("No existing session")
-        if transport.is_authenticated():
+        if self.transport.is_authenticated():
             raise AuthenticationException("Transport already authenticated")
 
         # Set the username from ssh_config, if not already set at __init__()
+        # or updated via `update_authentication_options()`
         if ssh_config["user"] is None:
              self.ssh_config["user"] = getpass.getuser()
         if explicit_methods:
@@ -324,7 +328,7 @@ class Authenticator(object):
                     self._log(INFO, "Authentication success!")
                     self.authenticated = True
                     self.in_progress = False
-                    self.transport._auth_trigger(self.ssh_config["user"])
+                    self.transport._auth_trigger()
                     break
                 elif ptype == MSG_USERAUTH_BANNER:
                     banner = m.get_text()

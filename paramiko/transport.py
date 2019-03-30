@@ -299,7 +299,6 @@ class Transport(threading.Thread, ClosingContextManager):
         """
         self.active = False
         self.hostname = None
-        self.authenticated_username = None
 
         if isinstance(sock, string_types):
             # convert "host:port" into (host, port)
@@ -426,7 +425,7 @@ class Transport(threading.Thread, ClosingContextManager):
                     self.local_cipher,
                     self._cipher_info[self.local_cipher]['key-size'] * 8
                 )
-            if self.authenticated:
+            if self.is_authenticated():
                 out += ' (active; {} open channel(s))'.format(
                     len(self._channels))
             elif self.initial_kex_done:
@@ -1263,7 +1262,8 @@ class Transport(threading.Thread, ClosingContextManager):
         """
         return (
             self.active and
-            self.authenticated
+            self.auth_handler is not None and
+            self.auth_handler.is_authenticated()
         )
 
     def get_username(self):
@@ -1274,7 +1274,9 @@ class Transport(threading.Thread, ClosingContextManager):
 
         :return: username that was authenticated (a `str`), or ``None``.
         """
-        return self.authenticated_username
+        if not self.active or(self.auth_handler is None):
+            return None
+        return self.auth_handler.get_username()
 
     def get_banner(self):
         """
@@ -2329,9 +2331,8 @@ class Transport(threading.Thread, ClosingContextManager):
         # we always expect to receive NEWKEYS now
         self._expect_packet(MSG_NEWKEYS)
 
-    def _auth_trigger(self, username=None):
+    def _auth_trigger(self):
         self.authenticated = True
-        self.authenticated_username = username
         # delayed initiation of compression
         if self.local_compression == 'zlib@openssh.com':
             compress_out = self._compression_info[self.local_compression][0]
