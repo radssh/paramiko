@@ -122,21 +122,37 @@ class Authenticator(object):
         "passwordauthentication": "yes",
         "challengeresponseauthentication": "yes",
         "preferredauthentications": "gssapi-with-mic,hostbased,publickey,keyboard-interactive,password",
-        "user": None, # Filled in later
-        "hostname": None # Needed for GSSAPI
         "batchmode": "yes",
-        "identityfile": [],
-        # "certificatefile": [],
         "enablesshkeysign": "no",
         "fingerprinthash": "sha256",
         "gssapidelegatecredentials": "no",
         "gssapi-keyex": "yes",
-        # "hostbasedkeytypes": "",
         "identitiesonly": "no",
         "identityagent": "SSH_AUTH_SOCK",
         "kbdinteractivedevices": "",
         "numberofpasswordprompts": "3",
+        # These could have defaults now, but leave them None for now
+        "user": None, # Filled in later
+        "hostname": None, # Needed for GSSAPI
+
+        # Placeholders/Reminders for future support
+
+        # TBD: CertificateFile processing in OpenSSH is contingent on pariing
+        # with a corresponding IdentityFile in scope with the same pubkey,
+        # not based on filename. Paramiko's current handling of certificates
+        # has a rather close dependency on filenames, so for now we just
+        # permit usage of certificate filenames as IdentityFile to imply
+        # a "Load both of these things"
+        "identityfile": None, # Actually a list, but avoid populating default with a mutable type
+        # "certificatefile": [],
+
+        # Add this option when the AuthHostBased class is implemented
+        # "hostbasedkeytypes": "",
+
+        # Future enhancement - support this for better smartcard support
         # "pkcs11provider": "", # TBD
+
+        # Future enhancement
         # "pubkeyacceptedkeytypes": "",
     }
 
@@ -145,10 +161,13 @@ class Authenticator(object):
             username=None,
             default_password=None,
             keyfile_or_key=None,
-            passphrase=None):
+            passphrase=None
+            insecure_logging=True # Remove before release!!!
+            ):
         # TODO: consider adding some more of SSHClient.connect (optionally, if
         # the caller didn't already do these things) like the call to
         # .start_client; then update lifecycle in docstring.
+
         self.transport = transport
         self.ssh_config = dict(self.default_ssh_config)
         self._log = logging.getLogger("paramiko.authenticator").log
@@ -182,7 +201,9 @@ class Authenticator(object):
         for ptype in range(MSG_USERAUTH_REQUEST, 79): # HIGHEST_USERAUTH_MESSAGE_ID
             self._handler_table[ptype] = makeshift_handler(ptype)
         self._handler_table[MSG_SERVICE_ACCEPT] = makeshift_handler(MSG_SERVICE_ACCEPT)
-
+        self.insecure_logging = insecure_logging
+        if self.insecure_logging:
+            self._log(ERROR, "*** Authenticator in Insecure Log mode - only for DEBUGGING ***")
 
     def update_authentication_options(self, config_dict=None, **kwargs):
         """
@@ -192,13 +213,16 @@ class Authenticator(object):
         comma-separated string
         Other values will be substituted in whole
         """
-        for k, v in itertools.chain(d.items(), kwargs):
+        for k, v in itertools.chain(config_dict.items(), kwargs):
             # Normalize keys to lowercase
             k = k.lower()
             if k not in self.ssh_config:
                 continue
             if isinstance(v, list):
-                self.ssh_config[k].extend(v)
+                if self.ssh_config[k]:
+                    self.ssh_config[k].extend(v)
+                else:
+                    self.ssh_config[k] = list(v)
             elif v.startswith('+'):
                 val = self.ssh_config[k].split(",")
                 val.extend(v[1:].split(","))
@@ -254,7 +278,7 @@ class Authenticator(object):
 
         # Set the username from ssh_config, if not already set at __init__()
         # or updated via `update_authentication_options()`
-        if ssh_config["user"] is None:
+        if self.ssh_config["user"] is None:
              self.ssh_config["user"] = getpass.getuser()
         if explicit_methods:
             # User supplied dict of method/iterators to use
@@ -457,7 +481,8 @@ class AuthPassword(AuthMethod):
             return
         # Interactive password prompt
         self.password = getpass.getpass("{}@{}'s password: ".format(
-            self.authenticator.username, self.authenticator.transport.hostname))
+            self.authenticator.ssh_config["user"],
+            self.authenticator.ssh_config["hostname"]))
 
     def _append_message(self, m):
         m.add_boolean(False)
@@ -486,9 +511,12 @@ class AuthPassword(AuthMethod):
     def __str__(self):
         # Obfuscate the password for simpler early debugging
         # Long term, probably don't want to even divulge the hashed password
-        hash = hashlib.sha1(self.password.encode())
-        return "Password:SHA1({})".format(hash.hexdigest())
-
+        if self.authenticator.insecure_logging:
+            hash = hashlib.sha1(self.password.encode())
+            # return "Password:SHA1({})".format(self.password)
+            return "Password:SHA1({})".format(hash.hexdigest())
+        else:
+            return "Password(hidden)"
 
 class AuthKeyboardInteractive(AuthMethod):
     method_name = "keyboard-interactive"
@@ -733,7 +761,7 @@ class AuthGSSAPI(AuthMethod):
             authenticator._log(INFO, "GSSAPI failure - {}".format(str(e)))
 
     def __str__(self):
-        return "GSSAPI (with MIC) using Kerberos"
+        return "GSSAPI (with MIC) using Kerberos: {}".format(self.sshgss)
 
     def additional_info(self, ptype, m):
         if ptype == MSG_USERAUTH_GSSAPI_ERRTOK:
@@ -754,34 +782,38 @@ class AuthGSSAPI(AuthMethod):
             self.mech = m.get_string()
             self.authenticator._log(DEBUG, "Server mechanism: {}".format(binascii.hexlify(self.mech)))
             token = self.sshgss.ssh_init_sec_context(
-                self.authenticator.transport.hostname, # self.gss_host,
+                self.authenticator.ssh_config["hostname"], # self.gss_host,
                 self.mech,
-                self.authenticator.username)
+                self.authenticator.ssh_config["user"])
             m = Message()
             m.add_byte(cMSG_USERAUTH_GSSAPI_TOKEN)
             m.add_string(token)
-            self.authenticator._log(DEBUG, "GSSAPI Token generated from ssh_init_sec_context(): {}".format(binascii.hexlify(token)))
+            if self.authenticator.insecure_logging:
+                self.authenticator._log(DEBUG, "GSSAPI Token generated from ssh_init_sec_context(): {}".format(binascii.hexlify(token)))
             return m
         if ptype == MSG_USERAUTH_GSSAPI_TOKEN:
             # Reprocess context with supplied token from server
             srv_token = m.get_string()
-            self.authenticator._log(DEBUG, "Server reply with GSSAPI Token: {}".format(binascii.hexlify(srv_token)))
+            if self.authenticator.insecure_logging:
+                self.authenticator._log(DEBUG, "Server reply with GSSAPI Token: {}".format(binascii.hexlify(srv_token)))
             next_token = self.sshgss.ssh_init_sec_context(
-                self.authenticator.transport.hostname, # self.gss_host,
+                self.authenticator.ssh_config["hostname"], # self.gss_host,
                 self.mech,
-                self.authenticator.username,
+                self.authenticator.ssh_config["user"],
                 srv_token)
             if next_token:
                 m = Message()
                 m.add_byte(cMSG_USERAUTH_GSSAPI_TOKEN)
                 m.add_string(next_token)
-                self.authenticator._log(DEBUG, "Client answer with GSSAPI Token: {}".format(binascii.hexlify(next_token)))
+                if self.authenticator.insecure_logging:
+                    self.authenticator._log(DEBUG, "Client answer with GSSAPI Token: {}".format(binascii.hexlify(next_token)))
                 return m
             m = Message()
             m.add_byte(cMSG_USERAUTH_GSSAPI_MIC)
             mic = self.sshgss.ssh_get_mic(self.authenticator.transport.session_id)
             m.add_string(mic)
-            self.authenticator._log(DEBUG, "Client finishing with GSSAPI MIC: {}".format(binascii.hexlify(mic)))
+            if self.authenticator.insecure_logging:
+                self.authenticator._log(DEBUG, "Client finishing with GSSAPI MIC: {}".format(binascii.hexlify(mic)))
             return m
         raise AuthenticationException("Unexpected message type for {}: {:d}".format(self.method_name, ptype))
 
@@ -801,7 +833,7 @@ class AuthGSSAPI_Keyex(AuthMethod):
             raise AuthenticationException("gssapi-keyex cannot be used because initial key exchange was not done via GSS")
 
     def _append_message(self, m):
-        kexgss = self.transport.kexgss_ctxt
+        kexgss = self.authenticator.transport.kexgss_ctxt
         kexgss.set_username(self.username)
         mic_token = kexgss.ssh_get_mic(self.authenticator.transport.session_id)
         m.add_string(mic_token)
@@ -815,4 +847,4 @@ class AuthGSSAPI_Keyex(AuthMethod):
             authenticator._log(INFO, "GSSAPI-keyex failure - {}".format(str(e)))
 
     def __str__(self):
-        return "GSSAPI (keyex)"
+        return "GSSAPI (keyex): {}".format(self.authenticator.transport.kexgss_ctxt)
