@@ -473,9 +473,9 @@ class Authenticator(object):
         if submethods:
             self.update_authentication_options(KbdInteractiveDevices=submethods)
         if handler:
-            self.authenticate({"gssapi-keyex": AuthKeyboardInteractive.factory(self, handlers=[handler])})
+            self.authenticate({"keyboard-interactive": AuthKeyboardInteractive.factory(self, handlers=[handler])})
         else:
-            self.authenticate({"gssapi-keyex": AuthKeyboardInteractive.factory(self)})
+            self.authenticate({"keyboard-interactive": AuthKeyboardInteractive.factory(self)})
         if event:
             event.set()
 
@@ -834,7 +834,10 @@ class AuthGSSAPI(AuthMethod):
 
     def __init__(self, authenticator, *args):
         AuthMethod.__init__(self, authenticator)
-        self.sshgss = GSSAuth(self.method_name, self.authenticator.ssh_config.get("gssapidelegatecredentials") == "yes")
+        self.sshgss = GSSAuth(
+            self.method_name,
+            self.authenticator.ssh_config.get("gssapidelegatecredentials") == "yes"
+        )
         self.mech = None
 
     def _append_message(self, m):
@@ -869,8 +872,11 @@ class AuthGSSAPI(AuthMethod):
             # Server passed the selected mechanism (OID)
             self.mech = m.get_string()
             self.authenticator._log(DEBUG, "Server mechanism: {}".format(binascii.hexlify(self.mech)))
+            gss_host = (self.authenticator.ssh_config.get("gssapiserveridentity")
+                or self.authenticator.ssh_config["hostname"]
+            )
             token = self.sshgss.ssh_init_sec_context(
-                self.authenticator.ssh_config["hostname"], # self.gss_host,
+                gss_host,
                 self.mech,
                 self.authenticator.ssh_config["user"])
             m = Message()
@@ -884,8 +890,11 @@ class AuthGSSAPI(AuthMethod):
             srv_token = m.get_string()
             # Is GSS Token value possibly sensitive information?
             # self.authenticator._log(DEBUG, "Server reply with GSSAPI Token: {}".format(binascii.hexlify(srv_token)))
+            gss_host = (self.authenticator.ssh_config.get("gssapiserveridentity")
+                or self.authenticator.ssh_config["hostname"]
+            )
             next_token = self.sshgss.ssh_init_sec_context(
-                self.authenticator.ssh_config["hostname"], # self.gss_host,
+                gss_host,
                 self.mech,
                 self.authenticator.ssh_config["user"],
                 srv_token)
