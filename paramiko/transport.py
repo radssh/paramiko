@@ -1291,6 +1291,20 @@ class Transport(threading.Thread, ClosingContextManager):
             return None
         return self.auth_handler.banner
 
+    def authenticate(self, ssh_config_options=None, **kwargs):
+        """
+        Perform user authentication in a dynamic fashion, based on server
+        supported mechanisms, with support for most SSHConfig options, which
+        can be passed in from `SSHConfig.lookup(host)`, or from a manually
+        constructed dictionary of options (via kwargs).
+        """
+        if not isinstance(self.auth_handler, Authenticator):
+            if self.auth_handler is not None:
+                self._log(INFO, "Replacing AuthHandler with Authenticator")
+            self.auth_handler = Authenticator(self)
+        self.auth_handler.update_authentication_options(ssh_config_options, **kwargs)
+        return self.auth_handler.authenticate()
+
     def auth_none(self, username):
         """
         Try to authenticate to the server using no authentication at all.

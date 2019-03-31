@@ -201,7 +201,7 @@ class Authenticator(object):
             self._handler_table[ptype] = makeshift_handler(ptype)
         self._handler_table[MSG_SERVICE_ACCEPT] = makeshift_handler(MSG_SERVICE_ACCEPT)
 
-    def update_authentication_options(self, config_dict={}, **kwargs):
+    def update_authentication_options(self, config_dict=None, **kwargs):
         """
         SSHConfig.lookup() or manually constructed dict
         Lists will be extended with updated values
@@ -209,7 +209,11 @@ class Authenticator(object):
         comma-separated string
         Other values will be substituted in whole
         """
-        for k, v in itertools.chain(config_dict.items(), kwargs.items()):
+        if config_dict:
+            settings = itertools.chain(config_dict.items(), kwargs.items())
+        else:
+            settings = kwargs.items()
+        for k, v in settings:
             # Normalize keys to lowercase
             k = k.lower()
             if k not in self.ssh_config:
