@@ -30,6 +30,8 @@ except ImportError:
     import queue as Queue
     from io import StringIO
 
+import six
+
 from paramiko.pkey import PKey
 from paramiko.rsakey import RSAKey
 from paramiko.dsskey import DSSKey
@@ -55,6 +57,23 @@ from paramiko.common import (
 )
 from paramiko.ssh_exception import AuthenticationException
 from paramiko.ssh_gss import GSSAuth, GSS_EXCEPTIONS
+
+# Should rest of Paramiko replace AuthHandler usage with Authenticator
+replace_auth_handler = True
+
+# Helper function to get identity filenames from ~/.ssh or ~/ssh (Windows)
+# Will also find certificate files as well as private key files
+def default_identity_files():
+    for sshdir in (os.path.expanduser("~/.ssh"), os.path.expanduser("~/ssh")):
+        if os.path.isdir(os.path.expanduser(sshdir)):
+            for keytype in ("rsa", "ed25519", "ecdsa", "dsa"):
+                keyfile = os.path.join(sshdir, "id_{}".format(keytype))
+                certfile = os.path.join(sshdir, "id_{}-cert.pub".format(keytype))
+                if os.path.exists(keyfile):
+                    yield keyfile
+                if os.path.exists(certfile):
+                    yield certfile
+
 
 class Authenticator(object):
     """
@@ -403,7 +422,8 @@ class Authenticator(object):
             # preserving the traceback
             self._log(ERROR, "Exception in authenticate(): {!r}".format(e))
             exc_type, exc_value, exc_traceback = sys.exc_info()
-            raise AuthenticationException, AuthenticationException(repr(e)), exc_traceback
+            six.raise_from(AuthenticationException, e)
+
         finally:
             self.transport.lock.release()
         return self.authenticated
@@ -728,16 +748,7 @@ class AuthPublicKey(AuthMethod):
             identity_files = authenticator.ssh_config.get("identityfile")
         else:
             # Prepare the list of default identity files
-            identity_files = []
-            for sshdir in (os.path.expanduser("~/.ssh"), os.path.expanduser("~/ssh")):
-                if os.path.isdir(os.path.expanduser(sshdir)):
-                    for keytype in ("rsa", "ed25519", "ecdsa", "dss"):
-                        keyfile = os.path.join(sshdir, "id_{}".format(keytype))
-                        certfile = os.path.join(sshdir, "id_{}-cert.pub".format(keytype))
-                        if os.path.exists(keyfile):
-                            identity_files.append(keyfile)
-                        if os.path.exists(certfile):
-                            identity_files.append(certfile)
+            identity_files = default_identity_files()
         # IdentitiesOnly controls the usage of ssh-agent to find additional keys
         if authenticator.ssh_config["identitiesonly"] == "no":
             agent = Agent()

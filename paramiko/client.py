@@ -42,6 +42,7 @@ from paramiko.ssh_exception import (
 )
 from paramiko.transport import Transport
 from paramiko.util import retry_on_signal, ClosingContextManager
+from paramiko.authenticator import Authenticator, replace_auth_handler, default_identity_files
 
 
 class SSHClient (ClosingContextManager):
@@ -407,6 +408,33 @@ class SSHClient (ClosingContextManager):
                     if our_key is None:
                         our_key = list(our_server_keys.values())[0]
                     raise BadHostKeyException(hostname, server_key, our_key)
+
+        # Try new style Authenticator here, instead of legacy _auth()
+        if replace_auth_handler:
+            # Most options should be taken from ssh_config, other
+            # than password/passphrase
+            t.auth_handler = Authenticator(t, username, password, pkey, passphrase)
+            if key_filename:
+                if isinstance(key_filename, string_types):
+                    t.auth_handler.update_authentication_options(
+                        IdentityFile=[key_filename]
+                    )
+                else:
+                    t.auth_handler.update_authentication_options(
+                        IdentityFile=key_filename
+                    )
+            if look_for_keys:
+                t.auth_handler.update_authentication_options(
+                    IdentityFile=list(default_identity_files())
+                )
+            t.authenticate(
+                IdentitiesOnly="yes" if not allow_agent else "no",
+                GSSAPIAuthentication="yes" if gss_auth or gss_kex else "no",
+                GSSAPIKeyExchange="yes" if gss_kex else "no",
+                GSSAPIDelegateCredentials="yes" if gss_deleg_creds else "no",
+                GSSAPIServerIdentity=t.gss_host or hostname
+            )
+            return
 
         if username is None:
             username = getpass.getuser()
