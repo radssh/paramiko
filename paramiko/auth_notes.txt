@@ -128,3 +128,18 @@ the dict was explicitly supplied to `authenticate()`), and the iterator's
 AuthMethod, the initial `USERAUTH_REQUEST` is sent, with the `Authenticator`
 handling responses of Success/Failure/Banner, with any other response
 message being passed along to the specific AuthMethod.
+
+
+Research Notes
+OpenSSH source checking:
+keyboard-interactive submethods do equate to option KbdInteractiveDevices
+(sshconnect2.c:userauth_kbdint())
+
+ChallengeResponseAuthentication (if set) supercedes KbdInteractiveAuthentication
+in both sshd.c (server) and sshconnect2.c (client) modes
+
+GSSAPI Patch (not from openssh-portable - reviewed CentOS SRPM gsskex.patch)
+Priority of gss_host: GSSAPIServerIdentity/GSSAPITrustDNS/connection hostname
+(or IP). DNS lookup for TrustDNS is extremely paranoid. Option for client
+normalization (GSSAPIClientIdentity) candidate for support during Transport
+GSSAPIKeyExchange
