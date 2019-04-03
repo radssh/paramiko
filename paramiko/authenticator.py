@@ -39,6 +39,7 @@ from paramiko.ecdsakey import ECDSAKey
 from paramiko.ed25519key import Ed25519Key
 from paramiko.agent import Agent
 from paramiko.message import Message
+from paramiko.config import LazyFqdn
 from paramiko.common import (
     cMSG_SERVICE_REQUEST, cMSG_DISCONNECT, DISCONNECT_SERVICE_NOT_AVAILABLE,
     DISCONNECT_NO_MORE_AUTH_METHODS_AVAILABLE, cMSG_USERAUTH_REQUEST,
@@ -304,6 +305,13 @@ class Authenticator(object):
         # or updated via `update_authentication_options()`
         if self.ssh_config["user"] is None:
              self.ssh_config["user"] = getpass.getuser()
+        if not self.ssh_config.get("gssapiserveridentity"):
+            if self.ssh_config.get("gssapitrustdns", "no") == "yes":
+                dnsname = LazyFqdn(self.ssh_config["hostname"])
+                self.ssh_config["gssapiserveridentity"] = str(dnsname)
+            else:
+                self.ssh_config["gssapiserveridentity"] = self.ssh_config["hostname"]
+
         if explicit_methods is not None:
             # User supplied dict of method/iterators to use
             preferred_authentications = list(explicit_methods)

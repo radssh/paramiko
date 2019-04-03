@@ -130,7 +130,25 @@ handling responses of Success/Failure/Banner, with any other response
 message being passed along to the specific AuthMethod.
 
 The `authenticate()` call assembles a dict of iterables (or can be passed an
-explicit one to use). 
+explicit one to use). Finalizes the setup of the ssh_config options, by filling
+in omitted default values for User, GSSAPIServerIdentity, and possibly any
+other elements that might be relied upon during deeper processing. A more
+thorough bulletproofing of the built SSHConfig could eventually eliminate
+this, but for a transitional step, it makes for a convenient sanity checkpoint
+rather than having infobits set ad hoc all over the code base (set_gss_host as
+one example).
+
+The built-up dict (if one is not passed in) attempts to follow the flow of
+the OpenSSH client, based on the chosen enabled (XXXAuthentication=yes) options
+and related options. Most of these are defaulting to the same settings as
+OpenSSH defaults (per the ssh_config man page), with one significant exception:
+BatchMode has a implied default of "yes", since the expectation is that
+paramiko scripts and programs will typically NOT be issuing direct interactive
+prompts to the user, but may choose to do so (by explicitly changing the
+BatchMode setting to "no").
+
+Once ready to go, there is a preliminary SSH protocol service request for the
+
 
 Research Notes
 OpenSSH source checking:
