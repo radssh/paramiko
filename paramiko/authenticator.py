@@ -55,7 +55,7 @@ from paramiko.common import (
     MSG_USERAUTH_GSSAPI_ERRTOK, MSG_USERAUTH_GSSAPI_MIC, MSG_NAMES,
     cMSG_USERAUTH_BANNER, MSG_USERAUTH_INFO_REQUEST, cMSG_USERAUTH_INFO_RESPONSE
 )
-from paramiko.ssh_exception import AuthenticationException
+from paramiko.ssh_exception import AuthenticationException, SSHException
 from paramiko.ssh_gss import GSSAuth, GSS_EXCEPTIONS
 
 # Should rest of Paramiko replace AuthHandler usage with Authenticator
@@ -156,12 +156,17 @@ class Authenticator(object):
 
         # Placeholders/Reminders for future support
 
-        # TBD: CertificateFile processing in OpenSSH is contingent on pariing
+        # TBD: CertificateFile processing in OpenSSH is performed by pariing
         # with a corresponding IdentityFile in scope with the same pubkey,
         # not based on filename. Paramiko's current handling of certificates
         # has a rather close dependency on filenames, so for now we just
         # permit usage of certificate filenames as IdentityFile to imply
-        # a "Load both of these things"
+        # a "Load both of these things". Much simpler, but not quite in step
+        # with OpenSSH. Until that happens, it's probably a smoother transition
+        # to begin making IdentityFile behave like a hybrid collector for
+        # (keys and certs) when handling filenames, and annotate to developers
+        # to pre-load certificates into PKey objects if any of that fancy
+        # key/cert mapping not based on filename suffixes is needed.
         "identityfile": None, # Actually a list, but avoid populating default with a mutable type
         # "certificatefile": [],
 
@@ -200,7 +205,7 @@ class Authenticator(object):
             self.key_list = [keyfile_or_key]
         else:
             self.key_list = []
-        self.passphrase = passphrase
+        self.passphrase = passphrase or default_password # Backward Compatible
         self.interactive_replybots = []
         self.interactive_handlers = []
         # State of authentication
@@ -328,12 +333,15 @@ class Authenticator(object):
         # Use ssh_config IdentityAgent setting (replaces allow_agent)
         ssh_agent = self.ssh_config.get("identityagent", "SSH_AUTH_SOCK")
         if ssh_agent == "none" and "SSH_AUTH_SOCK" in os.environ:
-            os.environ.pop("SSH_AUTH_SOCK")
+            restore_ssh_auth_sock = os.environ.pop("SSH_AUTH_SOCK")
             self._log(DEBUG, "Disabling ssh-agent key lookups (IdentityAgent none)")
         elif ssh_agent != "SSH_AUTH_SOCK":
+            restore_ssh_auth_sock = os.environ.get("SSH_AUTH_SOCK")
             os.environ["SSH_AUTH_SOCK"] = ssh_agent
             self._log(DEBUG, "Redirecting ssh-agent key lookups (IdentityAgent {})".format(ssh_agent))
-
+        else:
+            # Use original SSH_AUTH_SOCK setting
+            restore_ssh_auth_sock = None
 
         self.transport.lock.acquire()
         try:
@@ -415,16 +423,22 @@ class Authenticator(object):
                             self._log(DEBUG, "No more {} attempts available".format(method))
                 else:
                     self._log(INFO, "Client has run out of authentication methods")
-                    # raise AuthenticationException("Client has run out of authentication methods")
-                    return False
+                    # Backward Compatible - may prefer: return False
+                    # or AuthenticationException instead of SSHException
+                    raise SSHException("Client has run out of authentication methods")
         except Exception as e:
             # Catch-all, but relabel this as AuthenticationException
             # preserving the traceback
             self._log(ERROR, "Exception in authenticate(): {!r}".format(e))
-            exc_type, exc_value, exc_traceback = sys.exc_info()
+            # Not needed for existing unittest: six.raise_from(SSHException, e)
             six.raise_from(AuthenticationException, e)
 
         finally:
+            if restore_ssh_auth_sock:
+                # Put it back in case calling code then wants to connect
+                # to the original ssh-agent...
+                os.environ["SSH_AUTH_SOCK"] = restore_ssh_auth_sock
+            self.in_progress = False
             self.transport.lock.release()
         return self.authenticated
 

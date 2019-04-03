@@ -56,7 +56,7 @@ call "authenticate()" at all) to still authenticate.
 The capability of client getting asynchronous notification of stage completion
 via Python Event objects is deprecated. Since an unauthenticated Transport is
 not useful by itself prior to successful user authentication, the asynchronous
-notification will not be supported. If clients do pass Events, they will be
+notification is not worth maintaining. If clients do pass Events, they will be
 signaled at the end of processing, but not asynchronously.
 
 BadAuthenticationType and PartialAuthenticaiton exceptions will not be used
@@ -129,6 +129,8 @@ AuthMethod, the initial `USERAUTH_REQUEST` is sent, with the `Authenticator`
 handling responses of Success/Failure/Banner, with any other response
 message being passed along to the specific AuthMethod.
 
+The `authenticate()` call assembles a dict of iterables (or can be passed an
+explicit one to use). 
 
 Research Notes
 OpenSSH source checking:

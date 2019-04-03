@@ -417,7 +417,7 @@ class SSHClient (ClosingContextManager):
             if key_filename:
                 if isinstance(key_filename, string_types):
                     t.auth_handler.update_authentication_options(
-                        IdentityFile=[key_filename]
+                        IdentityFile=[key_filename, key_filename+"-cert.pub"]
                     )
                 else:
                     t.auth_handler.update_authentication_options(
