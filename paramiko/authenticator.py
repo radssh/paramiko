@@ -362,7 +362,10 @@ class Authenticator(object):
                 m.add_string(self.service_name)
                 self.transport._send_message(m)
                 # Server expected to reply with MSG_SERVICE_ACCEPT
-                resp = self.server_reply.get(timeout=self.transport.auth_timeout)
+                try:
+                    resp = self.server_reply.get(timeout=self.transport.auth_timeout)
+                except Queue.Empty:
+                    raise AuthenticationException("Server response timeout (MSG_SERVICE_REQUEST)")
                 ptype, m = resp
                 if ptype != MSG_SERVICE_ACCEPT:
                     raise AuthenticationException("Expected cMSG_SERVICE_ACCEPT(6), but got {:d}".format(ptype))
@@ -381,7 +384,7 @@ class Authenticator(object):
                 try:
                     ptype, m = self.server_reply.get(timeout=self.transport.auth_timeout)
                 except Queue.Empty:
-                    raise AuthenticationException("Server reply timeout during authentication")
+                    raise AuthenticationException("Server reply timeout during authentication ({})".format(current_auth))
                 self._log(DEBUG, "Got reply from server: {:d}".format(ptype))
 
                 if ptype == MSG_USERAUTH_SUCCESS:
@@ -434,6 +437,8 @@ class Authenticator(object):
                     # Backward Compatible - may prefer: return False
                     # or AuthenticationException instead of SSHException
                     raise SSHException("Client has run out of authentication methods")
+        except AuthenticationException:
+            raise
         except Exception as e:
             # Catch-all, but relabel this as AuthenticationException
             # preserving the traceback
